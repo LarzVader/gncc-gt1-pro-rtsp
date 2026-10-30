@@ -108,14 +108,16 @@ You need the folder `backup-<serial number>` the installer made.
 **The easy way, with a running RTSP firmware:**
 
 1. Copy your backup folder to the top folder of a FAT32 card, if it is not there.
-2. Make a text file `restore-stock.txt` in the top folder of the card, with the name
+2. **Delete the folder `wifitest` from the card.** With it on the card, the installer
+   starts again as soon as the stock firmware is back.
+3. Make a text file `restore-stock.txt` in the top folder of the card, with the name
    of the folder as its only line, like `backup-030353000000`.
-3. Put the card in and power the camera on. After about two minutes it restarts with
+4. Put the card in and power the camera on. After about two minutes it restarts with
    the stock firmware, including your old settings. `autoupdate.log` on the card
    tells you how it went.
 
-Your stock firmware comes back with the old connection to the cloud. Take the card
-out now, or the installer starts again if the `wifitest` folder is still on it.
+Your stock firmware comes back with your old Wi-Fi settings and its old connection to
+the cloud, so it goes online again as soon as it has started.
 
 **With the reset button, if the camera does not start any more:**
 

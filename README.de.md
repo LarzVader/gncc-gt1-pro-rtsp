@@ -131,8 +131,8 @@ Selbst bauen: [Building](docs/building.md).
 ## Risiken
 
 Du ersetzt die Firmware eines Geräts, auf eigene Gefahr und nur bei einer Kamera, die dir gehört. Du verlierst
-die Garantie und die Cloud-Funktionen der App. Die Methode ist an zwei Kameras getestet, das ist nicht viel.
-Hat es bei dir geklappt oder nicht? Sag bitte in einem [Issue](https://github.com/LarzVader/gncc-gt1-pro-rtsp/issues)
+die Garantie und die Cloud-Funktionen der App. Die Firmware läuft bisher auf zwei Kameras. Der Installer und der
+Rückweg zur Originalfirmware sind an einer davon getestet, das ist nicht viel. Hat es bei dir geklappt oder nicht? Sag bitte in einem [Issue](https://github.com/LarzVader/gncc-gt1-pro-rtsp/issues)
 Bescheid, mit deiner Firmware-Version.
 
 ## Danke

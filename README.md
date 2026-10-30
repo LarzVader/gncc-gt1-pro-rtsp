@@ -136,8 +136,9 @@ How that works, and what else is different from the stock firmware:
 ## Risks
 
 You replace the firmware of a device, at your own risk and only on a camera you own. You lose
-your warranty and the cloud functions of the app. The method has been tested on two cameras,
-which is not many. If it worked or did not work on yours, please tell us in an
+your warranty and the cloud functions of the app. The firmware runs on two cameras so far. The
+installer and the way back to the stock firmware have been tested on one of them, which is not
+much. If it worked or did not work on yours, please tell us in an
 [issue](https://github.com/LarzVader/gncc-gt1-pro-rtsp/issues), with your firmware version.
 
 ## Thanks

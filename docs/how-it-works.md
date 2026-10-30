@@ -38,8 +38,10 @@ one `full.bin`. Each partition is compared with a second read of the flash after
 caches are dropped, so what gets checked is really on the card.
 
 **3. Build.** For both images (ROOTFS and APP): unpack the free part from the card to
-the RAM disk, copy in the vendor files, run `mksquashfs`, delete the tree. The camera
-has 31 MB of RAM, so one image is built at a time and the result goes to the card.
+the RAM disk and run `mksquashfs`, which reads the vendor files straight from the
+camera's flash. The camera has 31 MB of RAM, so nothing is copied that does not have to
+be, one image is built at a time, it compresses with gzip instead of xz, and the result
+goes to the card.
 
 The result is compared with `images.sha256`. mksquashfs is deterministic: same files,
 same options, same bytes. So the firmware on your camera is **bit for bit the firmware

@@ -37,6 +37,12 @@ BACKUP=~/backup-030353000000               # from the card
 # the vendor files, into folders git ignores
 scripts/extract-vendor-blobs.sh $BACKUP/full.bin $R
 
+# the toolchain looks for its libraries in /opt: make it run from where it is.
+# Buildroot builds patchelf first 
+make -C $BR O=$OUT BR2_EXTERNAL=$R gncc_gt1pro_defconfig
+make -C $BR O=$OUT BR2_EXTERNAL=$R host-patchelf
+python3 scripts/toolchain-rpath-fix.py $TC $OUT/host/bin/patchelf
+
 # the firmware, takes about 20 minutes
 installer/build-firmware.sh $BR $OUT $TC
 
@@ -63,4 +69,6 @@ out of git, `make-release.sh` keeps them out of the package and stops if it find
 ## Where the licences come in
 
 A release has the source code of everything in the package that needs it. See
-[THIRD-PARTY.md](../THIRD-PARTY.md).
+[THIRD-PARTY.md](../THIRD-PARTY.md). To put that bundle together: `make legal-info` in
+Buildroot (with the same `O=` and `BR2_EXTERNAL=`), which stops at the vendor kernel
+after it saved the other packages, then `installer/make-sources.sh $OUT $BR 1.0`.
