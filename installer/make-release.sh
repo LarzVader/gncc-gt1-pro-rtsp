@@ -35,7 +35,7 @@ CARD=$DIST/sdcard
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 
-rm -rf "$DIST"
+rm -rf "$CARD" "$DIST/private" "$DIST"/gt1pro-rtsp-sdcard-*
 mkdir -p "$CARD/wifitest" "$CARD/rtsp-setup/bin"
 
 "$UNSQUASHFS" -q -n -no-xattrs -d "$T/root" "$O/images/rootfs.squashfs" >/dev/null
