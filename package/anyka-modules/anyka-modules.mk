@@ -1,6 +1,9 @@
 ANYKA_MODULES_VERSION = stock
 ANYKA_MODULES_SITE = $(BR2_EXTERNAL_ANYKA_PATH)/package/anyka-modules/files
 ANYKA_MODULES_SITE_METHOD = local
+# vendor files from your own camera: never part of a source bundle
+ANYKA_MODULES_REDISTRIBUTE = NO
+ANYKA_MODULES_LICENSE = PROPRIETARY
 
 define ANYKA_MODULES_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0644 $(@D)/ak_mci.ko $(TARGET_DIR)/lib/modules/ak_mci.ko

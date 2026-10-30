@@ -15,12 +15,12 @@ case "$1" in
     : > /var/lib/misc/udhcpd.leases 2>/dev/null
 
     # portal defaults on a blank CONFIG partition; SSID carries the MAC suffix
-    if [ ! -f /etc/config/hostapd.conf ] && [ -f /etc/hostapd.conf.default ]; then
+    if [ -x /usr/sbin/hostapd ] && [ ! -f /etc/config/hostapd.conf ] && [ -f /etc/hostapd.conf.default ]; then
       SUF=$(sed 's/://g' /sys/class/net/wlan0/address 2>/dev/null | tail -c 5)
       [ -n "$SUF" ] || SUF=0000
       sed "s/^ssid=.*/ssid=AKOST-$SUF/" /etc/hostapd.conf.default > /etc/config/hostapd.conf
     fi
-    [ -f /etc/config/udhcpd.conf ] || cp /etc/udhcpd.conf.default /etc/config/udhcpd.conf
+    [ -x /usr/sbin/hostapd ] && [ ! -f /etc/config/udhcpd.conf ] && cp /etc/udhcpd.conf.default /etc/config/udhcpd.conf
 
     start-stop-daemon -S -b -m -p /var/run/ipcd.pid -x /bin/sh -- -c \
       "exec /usr/bin/ipcd --sensor-cfg \"$ISPCFG\" $IPCD_ARGS > $IPCD_LOG 2>&1"
@@ -33,7 +33,7 @@ case "$1" in
 
     # No credentials: ipcd serves the portal but cannot raise the AP itself
     # (its readiness check never passes on the ATBM driver), so we own the AP.
-    if [ ! -f /etc/config/wifi.conf ]; then
+    if [ ! -f /etc/config/wifi.conf ] && [ -x /usr/sbin/hostapd ]; then
       (
         # wait for ipcd to exhaust its own AP attempts (its readiness
         # check never passes on the ATBM driver), then own the AP

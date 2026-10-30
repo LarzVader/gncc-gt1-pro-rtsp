@@ -1,0 +1,63 @@
+ipcd: peek for daylight every 10 minutes instead of every minute
+
+In night mode the camera switches the IR LED off for about 5 s to measure the
+ambient light. Once a minute that is a dark picture most of the time. The
+interval can be set with ir_peek_s in ipcd.conf.
+
+--- a/src/ipcd/src/ir.c
++++ b/src/ipcd/src/ir.c
+@@ -232,10 +232,22 @@
+  * to day, switch the LED off, see darkness and flip back. Boards with
+  * no light sensor (GNCC GT1 Pro: SAR ADC disabled in its DT) must
+  * peek instead: LED off, let AE settle, measure ambient, decide. */
+-#define IR_PEEK_INTERVAL_POLLS  120      /* peek every 60 s          */
+ #define IR_PEEK_SETTLE_POLLS    6        /* 3 s for AE after LED off */
+ #define IR_PEEK_SAMPLE_POLLS    4        /* 2 s of ambient samples   */
+ 
++/* Every peek costs about 5 s of dark picture, which is why it does not
++ * happen once a minute any more. Ten minutes delay the switch to day
++ * by at most that long, and by then there is light anyway. Set with
++ * ir_peek_s in ipcd.conf. */
++static unsigned peek_interval_polls = 600 * 1000 / IR_POLL_PERIOD_MS;
++
++void ir_set_peek_interval(unsigned seconds)
++{
++    if (seconds < 30) seconds = 30;
++    peek_interval_polls = seconds * 1000 / IR_POLL_PERIOD_MS;
++    fprintf(stderr, "[ir] peek interval -> %u s\n", seconds);
++}
++
+ static void *poll_thread(void *arg)
+ {
+     (void)arg;
+@@ -293,7 +305,7 @@
+             night_hits = 0;
+             if (peek_phase == 0) {
+                 day_hits = 0;
+-                if (++peek_wait < IR_PEEK_INTERVAL_POLLS) continue;
++                if ((unsigned)++peek_wait < peek_interval_polls) continue;
+                 peek_wait = 0;
+                 irled_set(0);
+                 peek_phase = 1;
+--- a/src/ipcd/src/cfgfile.c
++++ b/src/ipcd/src/cfgfile.c
+@@ -171,6 +171,9 @@
+             unsigned int u = (unsigned)strtoul(v, NULL, 10);
+             ir_set_threshold(k[3] == 'd' /* 'd2n' */, u);
+         }
++        else if (!strcmp(k, "ir_peek_s")) {
++            ir_set_peek_interval((unsigned)strtoul(v, NULL, 10));
++        }
+         else if (!strcmp(k, "md_threshold")) {
+             /* Same pattern as ir_*_lum: not part of capture_cfg,
+              * forwarded directly to the motion detector module. */
+--- a/src/ipcd/include/ipcd.h
++++ b/src/ipcd/include/ipcd.h
+@@ -234,6 +234,7 @@
+ /* Threshold accessors: which=0 reads/writes night_to_day_lum,
+  * which=1 reads/writes day_to_night_lum. */
+ void         ir_set_threshold(int which, unsigned int value);
++void         ir_set_peek_interval(unsigned seconds);
+ unsigned int ir_get_threshold(int which);
+ 
+ /* ---------------------------------------------------------------- */

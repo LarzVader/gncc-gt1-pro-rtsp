@@ -1,18 +1,76 @@
 #!/bin/sh
-# Thingino-style SD update for GNCC GK2 (writes KERNEL, ROOTFS, APP only)
+# Thingino-style SD update (writes KERNEL, ROOTFS, APP only) and the way back to
+# the stock firmware (also writes CONFIG, from a backup the installer made)
 [ "$1" = "start" ] || exit 0
 BB=/bin/busybox
 SD=/tmp/sd
 IMG=$SD/autoupdate-full.bin
+RF=$SD/restore-stock.txt
 
 i=0; while [ ! -b /dev/mmcblk0 ] && [ $i -lt 10 ]; do $BB sleep 0.5; i=$((i+1)); done
 DEV=/dev/mmcblk0p1; [ -b $DEV ] || DEV=/dev/mmcblk0
 
 $BB mkdir -p $SD
 $BB mount -t vfat $DEV $SD 2>/dev/null || { echo "autoupdate: cannot mount $DEV"; exit 0; }
-[ -f $IMG ] || { $BB umount $SD; exit 0; }
+[ -f $IMG ] || [ -f $RF ] || { $BB umount $SD; exit 0; }
 
 log() { echo "autoupdate: $*" | $BB tee -a $SD/autoupdate.log; }
+
+$BB grep -q '^mtd4:.*"KERNEL"' /proc/mtd && \
+$BB grep -q '^mtd5:.*"ROOTFS"' /proc/mtd && \
+$BB grep -q '^mtd6:.*"CONFIG"' /proc/mtd && \
+$BB grep -q '^mtd7:.*"APP"'    /proc/mtd || { log "unexpected partition table"; $BB umount $SD; exit 0; }
+
+# a RAM copy of BusyBox and its libraries: nothing may run from what gets overwritten
+to_ram() {
+  R=/tmp/upd
+  $BB mkdir -p $R/bin $R/lib $R/dev $R/proc $R/sd
+  $BB cp -a /lib/*.so* $R/lib/
+  $BB cp /bin/busybox $R/bin/
+  $BB mount -o bind /dev $R/dev
+  $BB mount -t proc proc $R/proc
+  $BB mount -o bind $SD $R/sd
+  # stop everything running from /usr before overwriting APP
+  $BB killall ipcd crond dropbear wpa_supplicant udhcpc hostapd 2>/dev/null
+  $BB sleep 1
+  $BB umount /usr 2>/dev/null || $BB umount -l /usr
+}
+
+if [ -f $RF ]; then
+  reject() { log "$1, not restoring"; $BB mv $RF $SD/restore-stock.bad; $BB sync; $BB umount $SD; exit 0; }
+  # restore-stock.txt holds the name of a backup folder on the card
+  FOLDER=$($BB tr -d '\r\n ' < $RF)
+  case "$FOLDER" in ''|*/*|.*) reject "bad folder name in restore-stock.txt" ;; esac
+  [ -d "$SD/$FOLDER" ] || reject "no folder $FOLDER"
+  for n in 4 5 6 7; do
+    f="$SD/$FOLDER/mtd$n.bin"
+    [ -f "$f" ] || reject "no mtd$n.bin in $FOLDER"
+    want=$(($($BB printf '0x%s' "$($BB sed -n "s/^mtd$n: \([0-9a-f]*\) .*/\1/p" /proc/mtd)")))
+    [ "$($BB wc -c < "$f")" -eq "$want" ] || reject "mtd$n.bin has the wrong size"
+  done
+  [ -f "$SD/$FOLDER/SHA256SUMS" ] || reject "no SHA256SUMS in $FOLDER"
+  (cd "$SD/$FOLDER" && $BB sha256sum -c SHA256SUMS >/dev/null) || reject "checksum mismatch in $FOLDER"
+  to_ram
+  $BB umount /etc/config 2>/dev/null || { log "cannot unmount CONFIG, not restoring"; $BB reboot -f; }
+  log "restoring stock firmware from $FOLDER"
+  $BB mv $RF $SD/restore-stock.done
+  $BB sync
+  $BB chroot $R /bin/busybox sh -c '
+  BB=/bin/busybox; D=/sd/'"$FOLDER"'; L=/sd/autoupdate.log; ok=1
+  for n in 6 7 4 5; do
+    $BB dd if=$D/mtd$n.bin of=/dev/mtdblock$n bs=4096 conv=fsync 2>/dev/null || ok=0
+    $BB sync
+    $BB blockdev --flushbufs /dev/mtdblock$n
+    $BB cmp $D/mtd$n.bin /dev/mtdblock$n || ok=0
+  done
+  [ $ok = 1 ] && echo "autoupdate: restore done" >> $L || \
+    echo "autoupdate: restore FAILED, use the U-Boot test_file recovery" >> $L
+  $BB sync; $BB sleep 1
+  $BB reboot -f
+  '
+  exit 0
+fi
+
 reject() { log "$1, not flashing"; $BB mv $IMG $SD/autoupdate-full.bad; $BB sync; $BB umount $SD; exit 0; }
 
 [ "$($BB wc -c < $IMG)" -eq 8388608 ] || reject "bad size"
@@ -23,22 +81,9 @@ magic() { $BB dd if=$IMG bs=1 skip=$(($1)) count=4 2>/dev/null | $BB hexdump -v 
 if [ -f $IMG.md5 ]; then
   (cd $SD && $BB md5sum -c autoupdate-full.bin.md5) || reject "md5 mismatch"
 fi
-$BB grep -q '^mtd4:.*"KERNEL"' /proc/mtd && \
-$BB grep -q '^mtd5:.*"ROOTFS"' /proc/mtd && \
-$BB grep -q '^mtd7:.*"APP"'    /proc/mtd || reject "unexpected partition table"
 
-R=/tmp/upd
-$BB mkdir -p $R/bin $R/lib $R/dev $R/proc $R/sd
-$BB cp -a /lib/*.so* $R/lib/
-$BB cp /bin/busybox $R/bin/
-$BB mount -o bind /dev $R/dev
-$BB mount -t proc proc $R/proc
-$BB mount -o bind $SD $R/sd
+to_ram
 log "flashing"
-# stop everything running from /usr before overwriting APP
-$BB killall ipcd crond dropbear wpa_supplicant udhcpc hostapd 2>/dev/null
-$BB sleep 1
-$BB umount /usr 2>/dev/null || $BB umount -l /usr
 
 $BB chroot $R /bin/busybox sh -c '
 BB=/bin/busybox; I=/sd/autoupdate-full.bin; L=/sd/autoupdate.log

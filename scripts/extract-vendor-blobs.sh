@@ -76,8 +76,8 @@ if [ -n "$isp" ]; then
     cp -a "$isp" "$ETCDIR/"
     ok "$(basename "$isp")"
     case "$(basename "$isp")" in
-        isp_f37p_*) : ;;
-        *) warn "that is not the JXF37 tuning file this build expects — your camera may have a different sensor" ;;
+        isp_f37p_*|isp_q03p_*) : ;;
+        *) warn "that is not one of the tuning files this build knows — your camera may have a different sensor" ;;
     esac
 else
     warn "no isp_*.conf found; ipcd will need --sensor-cfg pointing elsewhere"

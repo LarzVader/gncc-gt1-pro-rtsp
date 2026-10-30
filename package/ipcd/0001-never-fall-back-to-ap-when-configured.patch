@@ -1,0 +1,31 @@
+diff --git a/src/ipcd/src/main.c b/src/ipcd/src/main.c
+index f69a865..39b5252 100644
+--- a/src/ipcd/src/main.c
++++ b/src/ipcd/src/main.c
+@@ -343,19 +343,15 @@ static void mainloop(void)
+             sta_failures = 0;
+             run_online_loop();
+         } else {
++            /* Credentials are set, so keep trying for as long as it takes.
++             * AP mode has no way back to STA and its setup page needs no
++             * password: a router outage would take the camera offline for
++             * good and open it to anyone in range. */
+             sta_failures++;
+             wifi_stop_sta();
+-            if (sta_failures >= STA_RETRIES_BEFORE_AP) {
+-                fprintf(stderr,
+-                    "[netmgr] %d STA failures, falling back to AP\n",
+-                    sta_failures);
+-                run_ap_loop();
+-                sta_failures = 0;
+-            } else {
+-                fprintf(stderr, "[netmgr] retry %d/%d in 5s\n",
+-                    sta_failures, STA_RETRIES_BEFORE_AP);
+-                sleep(5);
+-            }
++            fprintf(stderr, "[netmgr] %d STA failures, retrying in 10s\n",
++                sta_failures);
++            sleep(10);
+         }
+     }
+ }

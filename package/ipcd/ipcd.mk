@@ -4,9 +4,15 @@
 #
 ################################################################################
 
-IPCD_VERSION = v0.3.1-gk2
+# tag v0.3.1-gk2, pinned to the reviewed commit
+IPCD_VERSION = 63e72fb0ac2ddc32f7a314d729d41cd60effd860
 IPCD_SITE = https://github.com/michelostojski/ipcd.git
 IPCD_SITE_METHOD = git
+IPCD_LICENSE = MIT
+IPCD_LICENSE_FILES = LICENSE
+# the repository also holds firmware dumps and decompiled vendor libraries: keep
+# them out of the source bundle. See THIRD-PARTY.md for where the source is
+IPCD_REDISTRIBUTE = NO
 
 # ipcd links against the Anyka SDK blobs, so anyka-libs must be built and
 # staged first.

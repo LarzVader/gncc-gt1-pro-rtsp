@@ -1,0 +1,15 @@
+ipcd: send a host name with the DHCP request
+
+So the camera shows up under a useful name in the router's list of devices.
+
+--- a/src/ipcd/src/wifi_ctrl.c
++++ b/src/ipcd/src/wifi_ctrl.c
+@@ -191,7 +191,7 @@
+     sleep(3);
+ 
+     /* Get DHCP lease in background. -t 5: 5 retries, then give up. */
+-    run_cmd("udhcpc -i %s -t 5 -T 3 -A 5", STA_IFACE);
++    run_cmd("udhcpc -i %s -t 5 -T 3 -A 5 -x hostname:gt1pro", STA_IFACE);
+ 
+     return WIFI_STA_OK;
+ }

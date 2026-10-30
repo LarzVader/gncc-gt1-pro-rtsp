@@ -1,0 +1,53 @@
+ipcd: RTP over TCP only, unless rtsp_udp = 1 is set
+
+The camera is on Wi-Fi, where UDP only loses packets. A SETUP for UDP gets
+461 Unsupported Transport, and ffmpeg, VLC and the others then retry with TCP
+by themselves.
+
+--- a/src/ipcd/src/rtsp_server.c
++++ b/src/ipcd/src/rtsp_server.c
+@@ -1223,6 +1223,11 @@
+  *    RTP/AVP;unicast;client_port=51000-51001
+  *
+  * Sets c->xport, c->iv_rtp_chan/iv_rtcp_chan or c->udp_rtp_addr port. */
++/* UDP transport is refused unless rtsp_udp = 1 is set in ipcd.conf: the
++ * camera is on Wi-Fi, where UDP only loses packets, and a 461 makes
++ * ffmpeg, VLC and the others retry with TCP by themselves. */
++int g_rtsp_udp = 0;
++
+ static int parse_transport(struct client_ctx *c, const char *transport)
+ {
+     if (!transport) return -1;
+@@ -1244,6 +1249,10 @@
+         }
+         return 0;
+     } else if (strstr(transport, "RTP/AVP") != NULL) {
++        if (!g_rtsp_udp) {
++            fprintf(stderr, "[rtsp] UDP transport refused, the client should retry with TCP\n");
++            return -1;
++        }
+         c->xport = XPORT_UDP;
+         const char *cp = strstr(transport, "client_port=");
+         if (!cp) return -1;
+--- a/src/ipcd/src/cfgfile.c
++++ b/src/ipcd/src/cfgfile.c
+@@ -174,6 +174,9 @@
+         else if (!strcmp(k, "ir_peek_s")) {
+             ir_set_peek_interval((unsigned)strtoul(v, NULL, 10));
+         }
++        else if (!strcmp(k, "rtsp_udp")) {
++            g_rtsp_udp = atoi(v) != 0;
++        }
+         else if (!strcmp(k, "md_threshold")) {
+             /* Same pattern as ir_*_lum: not part of capture_cfg,
+              * forwarded directly to the motion detector module. */
+--- a/src/ipcd/include/ipcd.h
++++ b/src/ipcd/include/ipcd.h
+@@ -235,6 +235,7 @@
+  * which=1 reads/writes day_to_night_lum. */
+ void         ir_set_threshold(int which, unsigned int value);
+ void         ir_set_peek_interval(unsigned seconds);
++extern int   g_rtsp_udp;           /* rtsp_server.c: allow RTP over UDP */
+ unsigned int ir_get_threshold(int which);
+ 
+ /* ---------------------------------------------------------------- */

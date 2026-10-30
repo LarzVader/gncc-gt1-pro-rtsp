@@ -1,0 +1,49 @@
+ipcd: associate with WPA2 only
+
+A network offering WPA2 and WPA3 at once never associates with the old block.
+
+--- a/src/ipcd/src/wifi_ctrl.c
++++ b/src/ipcd/src/wifi_ctrl.c
+@@ -88,36 +88,20 @@
+     wpa_quote(cfg->ssid, ssid_q, sizeof(ssid_q));
+     wpa_quote(cfg->psk,  psk_q,  sizeof(psk_q));
+ 
+-    /* Network block matching the configuration that's known to work
+-     * on this hardware (verified against the user's manual wifi.sh
+-     * script which successfully associates and gets DHCP).
+-     *
+-     *  - key_mgmt: list WPA-PSK + SAE so we cover both WPA2 and WPA3
+-     *    networks. The atbm chip negotiates whichever the AP offers.
+-     *  - pairwise / group: include CCMP-256 explicitly. Some WPA3 APs
+-     *    (the user's router included) advertise CCMP-256 as required
+-     *    pairwise/group cipher; without it in our list, association
+-     *    succeeds but key install / 4-way handshake yields a driver
+-     *    state where DHCP frames silently get dropped.
+-     *  - ieee80211w=1: PMF capable, required by WPA3.
+-     *  - both psk and sae_password: psk for WPA2 path, sae_password
+-     *    for WPA3 path. Same string is fine for both (8-63 char rule
+-     *    only matters for psk).
+-     */
++    /* WPA2 only. A network that offers WPA2 and WPA3 at once makes
++     * wpa_supplicant prefer SAE, and the atbm driver then stays in
++     * AUTHENTICATING for good. The same network associates at once
++     * with WPA-PSK. */
+     fprintf(f,
+         "ctrl_interface=%s\n"
+         "ap_scan=1\n"
+         "network={\n"
+         "    ssid=\"%s\"\n"
+-        "    key_mgmt=WPA-PSK SAE\n"
+-        "    pairwise=CCMP CCMP-256\n"
+-        "    group=CCMP CCMP-256\n"
+-        "    ieee80211w=1\n"
++        "    key_mgmt=WPA-PSK\n"
+         "    psk=\"%s\"\n"
+-        "    sae_password=\"%s\"\n"
+         "    scan_ssid=0\n"
+         "}\n",
+-        WPA_CTRL_DIR, ssid_q, psk_q, psk_q);
++        WPA_CTRL_DIR, ssid_q, psk_q);
+     fclose(f);
+     chmod(WPA_SUPPLICANT_RUN, 0600);
+     return 0;

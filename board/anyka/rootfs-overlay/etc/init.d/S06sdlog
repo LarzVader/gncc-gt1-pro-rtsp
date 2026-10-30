@@ -25,10 +25,11 @@ L=/tmp/sd/boot.log
 } >> $L
 sync
 
-# let the SD card supply wifi credentials (no console on some cameras)
-if [ -f /tmp/sd/wifi.conf ]; then
-  cp /tmp/sd/wifi.conf /etc/config/wifi.conf
-  chmod 600 /etc/config/wifi.conf
-  echo "sdlog: installed wifi.conf from card" >> /tmp/sd/boot.log
+# let the SD card supply credentials and settings (no console on some cameras);
+# they leave the card once copied, so a removed card holds no passwords
+for f in wifi.conf ipcd.conf ntp_server; do
+  [ -f /tmp/sd/$f ] || continue
+  cp /tmp/sd/$f /etc/config/$f && chmod 600 /etc/config/$f && rm -f /tmp/sd/$f
+  echo "sdlog: installed $f from card" >> /tmp/sd/boot.log
   sync
-fi
+done

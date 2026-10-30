@@ -1,0 +1,41 @@
+ipcd: keep the periodic stream stats out of the log
+
+Without a card the log is in RAM. At 2.6 MB a day it would fill /tmp within days.
+
+--- a/src/ipcd/src/cap_pipeline.c
++++ b/src/ipcd/src/cap_pipeline.c
+@@ -833,6 +833,7 @@
+     uint32_t max_empty     = 0;
+     uint32_t max_frame_len = 0;
+     time_t   stat_t = time(NULL);
++    unsigned stat_lines = 0;
+ 
+     /* Buffers reused per-iteration to avoid alloc/free in the hot loop.
+      * 16 NALs per AU is plenty: typical AKV output is 1 SPS + 1 PPS +
+@@ -925,13 +926,19 @@
+         /* periodic stats every 5s */
+         time_t now = time(NULL);
+         if (now - stat_t >= 5) {
+-            fprintf(stderr,
+-                "[s%d] %us: %u f (%u key), %llu KB, "
+-                "max_frame=%uB, push_fails=%u, max_empty=%u\n",
+-                s->idx, (unsigned)(now - stat_t),
+-                total_frames, keyframes,
+-                (unsigned long long)(total_bytes / 1024),
+-                max_frame_len, push_fails, max_empty);
++            /* Without a card this goes to RAM and would fill /tmp within
++             * days: print the first intervals and intervals without any
++             * frame. /api/stats has the numbers. */
++            if (stat_lines < 3 || total_frames == 0) {
++                stat_lines++;
++                fprintf(stderr,
++                    "[s%d] %us: %u f (%u key), %llu KB, "
++                    "max_frame=%uB, push_fails=%u, max_empty=%u\n",
++                    s->idx, (unsigned)(now - stat_t),
++                    total_frames, keyframes,
++                    (unsigned long long)(total_bytes / 1024),
++                    max_frame_len, push_fails, max_empty);
++            }
+             total_bytes  = 0;
+             total_frames = 0;
+             keyframes    = 0;

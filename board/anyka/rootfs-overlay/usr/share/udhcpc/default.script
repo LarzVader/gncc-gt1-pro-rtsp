@@ -1,0 +1,24 @@
+#!/bin/sh
+# udhcpc script for a camera that stays on the local network: it takes address
+# and netmask from the DHCP server and ignores its router and DNS server. Without
+# a route the camera has no way out, with or without a rule on the router.
+
+[ -n "$broadcast" ] && BROADCAST="broadcast $broadcast"
+[ -n "$subnet" ] && NETMASK="netmask $subnet"
+
+case "$1" in
+	deconfig)
+		/sbin/ifconfig $interface up
+		/sbin/ifconfig $interface 0.0.0.0
+		;;
+	renew|bound)
+		/sbin/ifconfig $interface $ip $BROADCAST $NETMASK
+		# leave the address on the card, if one is still in the camera
+		if mountpoint -q /tmp/sd 2>/dev/null; then
+			echo "$ip  $(cat /sys/class/net/$interface/address 2>/dev/null)" > /tmp/sd/camera-ip.txt 2>/dev/null
+			sync
+		fi
+		;;
+esac
+
+exit 0

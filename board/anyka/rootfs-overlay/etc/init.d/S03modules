@@ -12,6 +12,7 @@ insmod /lib/modules/ak_mci.ko sdio_clk_mode=1
 # persistent config partition
 mkdir -p /etc/config
 mount -t jffs2 /dev/mtdblock6 /etc/config
+mkdir -p /etc/config/dropbear
 
 log3 "usr mounted: $(mount | grep -c /usr) ; modules dir: $([ -d $M ] && echo yes || echo NO)"
 [ -d $M ] || exit 0

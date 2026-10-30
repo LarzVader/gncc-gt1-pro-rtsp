@@ -1,0 +1,19 @@
+ipcd: find the IR-cut GPIOs
+
+strstr() matched the /gpio/ directory, not /gpioNN, so the number never parsed,
+export was skipped and the filter stayed wherever it was. Night vision needs it out.
+
+--- a/src/ipcd/src/ir.c
++++ b/src/ipcd/src/ir.c
+@@ -107,9 +107,9 @@
+ static int try_export_gpio(const char *gpio_value_path)
+ {
+     /* Extract NN from "/sys/class/gpio/gpioNN/value" */
+-    const char *p = strstr(gpio_value_path, "/gpio");
++    const char *p = strstr(gpio_value_path, "/gpio/gpio");
+     if (!p) return -1;
+-    p += 5;
++    p += 10;
+     char num[8] = {0};
+     int i = 0;
+     while (*p >= '0' && *p <= '9' && i < 7) num[i++] = *p++;

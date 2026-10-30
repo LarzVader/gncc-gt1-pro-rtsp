@@ -1,0 +1,70 @@
+diff --git a/src/ipcd/src/timesync.c b/src/ipcd/src/timesync.c
+index e62c5b6..16a00aa 100644
+--- a/src/ipcd/src/timesync.c
++++ b/src/ipcd/src/timesync.c
+@@ -23,8 +23,26 @@
+ 
+ #include "ipcd.h"
+ 
+-#define NTP_PEERS_DEFAULT \
+-    "-p pool.ntp.org -p time.google.com -p time.cloudflare.com"
++#define NTP_SERVER_PATH "/etc/config/ntp_server"
++
++/* The NTP server comes from NTP_SERVER_PATH. Without that file the camera
++ * sends no NTP traffic and keeps its RTC time. Only host-name characters
++ * are accepted because the value ends up in a shell command.
++ * Returns 0 if a server is configured. */
++static int ntp_server(char *out, size_t cap)
++{
++    FILE *f = fopen(NTP_SERVER_PATH, "r");
++    if (!f) return -1;
++    char *got = fgets(out, (int)cap, f);
++    fclose(f);
++    if (!got) return -1;
++    out[strcspn(out, " \t\r\n")] = 0;
++    if (!out[0] || strspn(out, "abcdefghijklmnopqrstuvwxyz"
++                               "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
++                               "0123456789.-:") != strlen(out))
++        return -1;
++    return 0;
++}
+ 
+ /* Run a command with a wall-clock timeout. Returns child exit status,
+  * or -1 on spawn failure / timeout. */
+@@ -50,14 +68,13 @@ static int run_with_timeout(const char *argv0, char *const argv[], int timeout_s
+ 
+ int timesync_oneshot(void)
+ {
++    char server[128];
++    if (ntp_server(server, sizeof(server)) != 0) {
++        fprintf(stderr, "[time] no %s, NTP off\n", NTP_SERVER_PATH);
++        return -1;
++    }
+     /* BusyBox ntpd: -n no-fork, -q quit-after-sync, -p peer */
+-    char *argv[] = {
+-        "ntpd", "-nq",
+-        "-p", "pool.ntp.org",
+-        "-p", "time.google.com",
+-        "-p", "time.cloudflare.com",
+-        NULL
+-    };
++    char *argv[] = { "ntpd", "-nq", "-p", server, NULL };
+     int rc = run_with_timeout("ntpd", argv, 15);
+     if (rc != 0) {
+         fprintf(stderr, "[time] ntpd -nq failed (rc=%d), keeping current clock\n", rc);
+@@ -71,10 +88,12 @@ int timesync_oneshot(void)
+ 
+ int timesync_daemon_start(void)
+ {
++    char server[128];
++    if (ntp_server(server, sizeof(server)) != 0) return -1;
+     /* fire-and-forget; if a previous ntpd lingers, kill it first */
+-    int sysrc = system("killall -q ntpd; "
+-           "ntpd -p pool.ntp.org -p time.google.com -p time.cloudflare.com "
+-           "2>/dev/null");
++    char cmd[256];
++    snprintf(cmd, sizeof(cmd), "killall -q ntpd; ntpd -p %s 2>/dev/null", server);
++    int sysrc = system(cmd);
+     (void)sysrc;
+     return 0;
+ }

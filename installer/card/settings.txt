@@ -1,0 +1,38 @@
+# GT1 Pro RTSP firmware: settings
+#
+# Enter the name and the password of your Wi-Fi. Everything else is optional.
+# Write each value directly after the = sign, without quotes.
+# The camera needs a 2.4 GHz network with WPA2.
+
+WIFI_SSID=
+WIFI_PASSWORD=
+
+
+# Optional: your own user name and passwords.
+# Leave the passwords empty and every camera gets its own random ones. You find
+# them on this card afterwards, in CAMERA-ACCESS-<serial number>.txt.
+# Allowed characters: letters, digits and - _ . ~
+
+RTSP_USER=camera
+RTSP_PASSWORD=
+ROOT_PASSWORD=
+
+
+# Optional: the address of an NTP server on your local network. The camera has no
+# way out to the internet, so without one its clock stays wrong. This does not
+# affect the video.
+
+NTP_SERVER=
+
+
+# yes: only check whether this camera is compatible and save the backup. The
+# firmware is not replaced.
+
+CHECK_ONLY=no
+
+
+# yes: install even if the stock firmware of this camera differs from the tested
+# one. The installer then uses files it has never seen. Read docs/troubleshooting.md
+# in the project first.
+
+FORCE_UNKNOWN_FIRMWARE=no

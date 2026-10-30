@@ -23,4 +23,4 @@ printf 'network={\n ssid="%s"\n psk="%s"\n scan_ssid=1\n}\n' "$SSID" "$PSK" > $C
 chmod 600 $CONF
 log "starting wpa_supplicant for ssid=$SSID"
 wpa_supplicant -B -Dnl80211 -i wlan0 -c $CONF; log "wpa rc=$?"
-udhcpc -b -i wlan0 -S; log "udhcpc rc=$?"
+udhcpc -b -i wlan0 -S -x hostname:gt1pro; log "udhcpc rc=$?"

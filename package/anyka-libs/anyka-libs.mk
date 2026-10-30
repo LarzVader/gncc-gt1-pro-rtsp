@@ -1,6 +1,9 @@
 ANYKA_LIBS_VERSION = 1.0
 ANYKA_LIBS_SITE = $(BR2_EXTERNAL_ANYKA_PATH)/package/anyka-libs
 ANYKA_LIBS_SITE_METHOD = local
+# vendor files from your own camera: never part of a source bundle
+ANYKA_LIBS_REDISTRIBUTE = NO
+ANYKA_LIBS_LICENSE = PROPRIETARY
 
 ANYKA_LIBS_INSTALL_STAGING = YES
 

@@ -1,0 +1,26 @@
+diff --git a/src/ipcd/include/ipcd.h b/src/ipcd/include/ipcd.h
+index 6d68213..4e0adee 100644
+--- a/src/ipcd/include/ipcd.h
++++ b/src/ipcd/include/ipcd.h
+@@ -429,7 +429,7 @@ int  audio_in_acquire(void);
+ void audio_in_release(void);
+ 
+ /* Master enable: when 0, the mic is fully off — no SDK chain,
+- * no SDP audio entry, no acquire() succeeds. Default 1.
++ * no SDP audio entry, no acquire() succeeds. Default 0.
+  * Settable via /api/config audio_in_enable=0|1. */
+ void audio_in_set_enable(int enable);
+ int  audio_in_get_enable(void);
+diff --git a/src/ipcd/src/audio_in.c b/src/ipcd/src/audio_in.c
+index 3d0859a..ee90f09 100644
+--- a/src/ipcd/src/audio_in.c
++++ b/src/ipcd/src/audio_in.c
+@@ -285,7 +285,7 @@ static void chain_stop_locked(void);
+ /* Master enable. Set to 0 via /api/config to disable mic entirely
+  * (audio is then absent from the RTSP SDP — clients see video
+  * only). Also useful for privacy. Default 1. */
+-static int g_audio_in_enable = 1;
++static int g_audio_in_enable = 0;
+ 
+ void audio_in_set_enable(int enable)
+ {

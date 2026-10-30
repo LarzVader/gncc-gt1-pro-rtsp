@@ -25,3 +25,6 @@ dl/
 package/anyka-libs/etc/
 package/ipcd/src/
 !docs/img/*.jpg
+
+# the package and what it is built from
+dist/
