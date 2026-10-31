@@ -60,7 +60,7 @@ installer/make-release.sh $OUT stock 1.1
 
 `dist/sdcard` is what goes on the card. If you used the same sources and stock firmware
 as the release, `images.sha256` has the same checksums for ROOTFS and APP. The kernel
-differs in its build time stamp.
+should match too, as it is built with a fixed build name and time (see `external.mk`).
 
 Keep `stock/`, `package/anyka-libs/lib`, `package/anyka-modules/files` and
 `board/anyka/stock` to yourself: these are the vendor's files. `.gitignore` keeps them
