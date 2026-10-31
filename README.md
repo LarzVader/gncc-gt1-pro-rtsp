@@ -14,7 +14,7 @@ and wait a quarter of an hour.
 - **H.264 over RTSP**: `rtsp://<camera>:8554/main` (2304×1296) and `/sub` (640×360),
   usable with VLC, ffmpeg, Frigate, Home Assistant, Scrypted, Blue Iris and others
 - **ONVIF** device discovery
-- **Night vision**: the IR LEDs and the IR filter switch by themselves
+- **Night vision in black and white**: the IR LEDs and the IR filter switch by themselves
 - **No way out**: the camera ignores the gateway and DNS server of your router, so it
   cannot reach the internet, even without a rule on your router
 - **Its own passwords** on every camera, random unless you set them. There is no default
@@ -105,8 +105,9 @@ There is also a small web page at `http://<camera>/`, with the same user name an
 - **The clock stays wrong** without an NTP server on your network, as the camera has no way
   to the internet. Set `NTP_SERVER` in `settings.txt` if you have one. This does not affect
   the video.
-- **Night images have a light lilac tint**, because the switch of the encoder to black and
-  white crashes on this chip for now.
+- **Night images are black and white.** IR light has no colour the sensor could show, only a
+  lilac tint, so the firmware takes the colour out. It comes back by itself when the camera
+  switches to day.
 - **Do not press the reset button during operation.** It is only for the recovery at
   power-on.
 - There is no setup portal: this firmware never opens an access point. Change your Wi-Fi with
@@ -137,8 +138,8 @@ How that works, and what else is different from the stock firmware:
 
 You replace the firmware of a device, at your own risk and only on a camera you own. You lose
 your warranty and the cloud functions of the app. The firmware runs on two cameras so far. The
-installer and the way back to the stock firmware have been tested on one of them, which is not
-much. If it worked or did not work on yours, please tell us in an
+installer and the way back to the stock firmware have been tested on one of them, with version
+1.0, which is not much. If it worked or did not work on yours, please tell us in an
 [issue](https://github.com/LarzVader/gncc-gt1-pro-rtsp/issues), with your firmware version.
 
 ## Thanks

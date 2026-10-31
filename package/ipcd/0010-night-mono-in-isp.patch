@@ -1,0 +1,114 @@
+ipcd: black and white picture at night, done in the ISP
+
+With the IR filter out and the IR LEDs on, the picture stayed in colour: IR light
+is lilac on the colour sensor, and any visible light keeps its own colour next to
+it. The switch to mono in the encoder kills the process on this camera, so it has
+been switched off, and nothing replaced it.
+
+The YUV effect block of the ISP has a gain on the chroma. Setting it to 0 takes the
+colour out of both streams, and it goes back to its old value by day. The IR poll
+thread checks it twice a second, as a restart of the capture pipeline loads the
+ISP defaults again.
+
+--- a/src/ipcd/src/cap_pipeline.c
++++ b/src/ipcd/src/cap_pipeline.c
+@@ -1727,31 +1727,64 @@
+     g_cap_super_started = 1;
+     return 0;
+ }
+-/* Switch encoder chroma: color=1 (day/YUV420), color=0 (night/mono).
+- * Matches stock anyka_ipc set_encoder_chroma_mode - fixes IR night tint. */
++/* Picture without colour at night, done in the ISP: color=1 (day), color=0
++ * (night).
++ *
++ * With the IR filter out and the IR LEDs on, the colours mean nothing: IR light
++ * looks lilac on the colour sensor, and visible light keeps its own colour next
++ * to it. The stock firmware fixes this in the encoder, but ak_venc_set_attr()
++ * kills the process on the mono->color switch here (GNCC GT1 Pro, JX-Q03):
++ * encode_param is reverse-engineered and does not match the vendor layout
++ * closely enough to write back.
++ *
++ * The YUV effect block of the ISP has a gain on the chroma, uv_a. At 0 no colour
++ * is left, in both streams. The layout comes from isp_set_effect() in
++ * libplat_vpss, whose saturation setting moves the same field but can only take
++ * 50 off it, which is not enough.
++ *
++ * Calling this again and again is fine, it only writes when something has to
++ * change. The IR poll thread does that, as a restart of the capture pipeline
++ * loads the ISP defaults again. */
++typedef struct {
++    unsigned short y_a;
++    short          y_b;
++    unsigned short uv_a;
++    short          uv_b;
++    unsigned short dark_margin_en;
++} isp_effect_attr;
++extern int AK_ISP_get_effect_attr(int dev_id, void *attr);
++extern int AK_ISP_set_effect_attr(int dev_id, const void *attr);
++
+ void cap_set_chroma(int color)
+ {
+-    for (int i = 0; i < 2; i++) {
+-        if (g_streams[i].venc_id < 0) continue;
+-        /* encode_param is reverse-engineered; pad it so a larger vendor
+-         * struct written by ak_venc_get_attr cannot overrun the stack. */
+-        union { struct encode_param ep; unsigned char pad[1024]; } u;
+-        memset(&u, 0, sizeof(u));
+-        fprintf(stderr, "[cap] chroma s%d get_attr...\n", i);
+-        int gr = ak_venc_get_attr(g_streams[i].venc_id, &u.ep);
+-        fprintf(stderr, "[cap] chroma s%d get=%d set...\n", i, gr);
+-        if (gr == 0) {
+-            u.ep.chroma_mode = color ? 1 : 0;
+-            /* Disabled: ak_venc_set_attr() kills the process on the
+-             * mono->color switch (GNCC GT1 Pro, JX-Q03). encode_param
+-             * is reverse-engineered and evidently does not match the
+-             * vendor layout closely enough to write back. Costs only
+-             * the IR pink-tint correction. */
+-            int sr = -1; (void)u.ep.chroma_mode;
+-            fprintf(stderr, "[cap] chroma s%d set=%d\n", i, sr);
+-        }
++    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
++    static int day_uv_a = -1;   /* known once the night has been on */
++    static int day_uv_b = 0;
++    /* padded so a larger vendor struct cannot overrun the stack */
++    union { isp_effect_attr e; unsigned char pad[64]; } u;
++
++    pthread_mutex_lock(&lock);
++    if (color && day_uv_a < 0) goto out;    /* still as the ISP started */
++
++    memset(&u, 0xff, sizeof(u));
++    if (AK_ISP_get_effect_attr(0, &u.e) != 0 || u.e.uv_a == 0xffff)
++        goto out;                           /* ISP not up yet */
++
++    if (!color && (day_uv_a < 0 || u.e.uv_a != 0)) {
++        day_uv_a = u.e.uv_a;
++        day_uv_b = u.e.uv_b;
+     }
+-    fprintf(stderr, "[cap] chroma -> %s\n", color ? "color" : "mono");
++    int uv_a = color ? day_uv_a : 0;
++    int uv_b = color ? day_uv_b : 0;
++    if (u.e.uv_a != uv_a || u.e.uv_b != uv_b) {
++        u.e.uv_a = (unsigned short)uv_a;
++        u.e.uv_b = (short)uv_b;
++        int rc = AK_ISP_set_effect_attr(0, &u.e);
++        fprintf(stderr, "[cap] chroma -> %s (uv_a=%d uv_b=%d rc=%d)\n",
++                color ? "color" : "mono", uv_a, uv_b, rc);
++    }
++out:
++    pthread_mutex_unlock(&lock);
+ }
+ void capture_stop(void)
+ {
+--- a/src/ipcd/src/ir.c
++++ b/src/ipcd/src/ir.c
+@@ -277,6 +277,10 @@
+         unsigned  lo      = (unsigned)lumi <= I.night_to_day_lum;
+         pthread_mutex_unlock(&I.mtx);
+ 
++        /* The ISP is up if we got here. It may have just been restarted, or
++         * night may have been forced before it came up. */
++        cap_set_chroma(my_lvl ? 0 : 1);
++
+         if (mode != IR_MODE_AUTO) {
+             night_hits = day_hits = 0;
+             peek_wait = peek_phase = 0;

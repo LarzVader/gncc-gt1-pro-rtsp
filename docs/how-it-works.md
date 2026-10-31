@@ -112,6 +112,8 @@ here in `docs/`, and the original README is `docs/upstream-README.md`. Compared 
   - `0008`: check for daylight every 10 minutes instead of every minute: each check is
     5 s of dark picture
   - `0009`: RTP over TCP only, unless `rtsp_udp = 1` is set: over Wi-Fi, UDP loses packets
+  - `0010`: black and white at night, by setting the chroma gain of the ISP to 0: the same
+    switch in the encoder kills the process on this camera
 - **A smaller image**, as there is no hostapd, no OpenSSL and no WPA3, and no setup
   portal: the camera never opens an access point.
 - Vendor libraries the firmware does not use are left out, among them the debug servers

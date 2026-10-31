@@ -55,7 +55,7 @@ $OUT/host/bin/unsquashfs -d stock/root $BACKUP/mtd5.bin
 $OUT/host/bin/unsquashfs -d stock/app $BACKUP/mtd7.bin
 
 # the package, in dist/
-installer/make-release.sh $OUT stock 1.0
+installer/make-release.sh $OUT stock 1.1
 ```
 
 `dist/sdcard` is what goes on the card. If you used the same sources and stock firmware
@@ -71,4 +71,4 @@ out of git, `make-release.sh` keeps them out of the package and stops if it find
 A release has the source code of everything in the package that needs it. See
 [THIRD-PARTY.md](../THIRD-PARTY.md). To put that bundle together: `make legal-info` in
 Buildroot (with the same `O=` and `BR2_EXTERNAL=`), which stops at the vendor kernel
-after it saved the other packages, then `installer/make-sources.sh $OUT $BR 1.0`.
+after it saved the other packages, then `installer/make-sources.sh $OUT $BR 1.1`.

@@ -13,7 +13,7 @@ Paket auf eine Karte kopieren, WLAN eintragen, Karte in die Kamera, Strom an, ei
 - **H.264 über RTSP**: `rtsp://<kamera>:8554/main` (2304×1296) und `/sub` (640×360), für VLC, ffmpeg,
   Frigate, Home Assistant, Scrypted, Blue Iris und andere
 - **ONVIF**-Geräteerkennung
-- **Nachtsicht**: IR-LEDs und IR-Filter schalten von selbst um
+- **Nachtsicht in Schwarz-Weiß**: IR-LEDs und IR-Filter schalten von selbst um
 - **Kein Weg nach draußen**: Die Kamera ignoriert Gateway und DNS-Server deines Routers und kommt
   deshalb nicht ins Internet, auch ohne Sperrregel im Router
 - **Eigene Passwörter** auf jeder Kamera, zufällig erzeugt, wenn du keine vorgibst. Ein Standardpasswort
@@ -101,8 +101,8 @@ Unter `http://<kamera>/` gibt es außerdem eine kleine Webseite, mit demselben B
 - **Die Uhr geht falsch**, wenn es in deinem Netz keinen NTP-Server gibt, weil die Kamera nicht ins Internet
   kommt. Hast du einen, trag ihn in `settings.txt` unter `NTP_SERVER` ein. Auf das Video hat das keinen
   Einfluss.
-- **Nachtbilder haben einen leichten Lila-Stich**, weil der Encoder bei der Umschaltung auf Schwarz-Weiß auf
-  diesem Chip bisher abstürzt.
+- **Nachtbilder sind schwarz-weiß.** Infrarotlicht hat keine Farbe, die der Sensor zeigen könnte, nur einen
+  Lila-Stich. Darum nimmt die Firmware die Farbe heraus. Sobald die Kamera auf Tag schaltet, kommt sie von selbst zurück.
 - **Drück die Reset-Taste nicht im laufenden Betrieb.** Sie ist nur für die Rettung beim Einschalten gedacht.
 - Es gibt kein Einrichtungsportal: Diese Firmware öffnet nie einen eigenen WLAN-Zugangspunkt. Dein WLAN änderst
   du mit einer Datei auf der Karte, siehe [Fehlersuche](docs/troubleshooting.md#the-blue-led-keeps-blinking-the-camera-does-not-get-onto-the-wi-fi)
@@ -132,7 +132,7 @@ Selbst bauen: [Building](docs/building.md).
 
 Du ersetzt die Firmware eines Geräts, auf eigene Gefahr und nur bei einer Kamera, die dir gehört. Du verlierst
 die Garantie und die Cloud-Funktionen der App. Die Firmware läuft bisher auf zwei Kameras. Der Installer und der
-Rückweg zur Originalfirmware sind an einer davon getestet, das ist nicht viel. Hat es bei dir geklappt oder nicht? Sag bitte in einem [Issue](https://github.com/LarzVader/gncc-gt1-pro-rtsp/issues)
+Rückweg zur Originalfirmware sind an einer davon getestet, mit Version 1.0, das ist nicht viel. Hat es bei dir geklappt oder nicht? Sag bitte in einem [Issue](https://github.com/LarzVader/gncc-gt1-pro-rtsp/issues)
 Bescheid, mit deiner Firmware-Version.
 
 ## Danke
