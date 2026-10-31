@@ -158,6 +158,28 @@ echo "$VERSION" > "$CARD/rtsp-setup/VERSION"
 mkdir -p "$CARD/rtsp-setup/licenses"
 cp "$REPO/LICENSE" "$CARD/rtsp-setup/licenses/LICENSE-this-project.txt"
 cp "$REPO/THIRD-PARTY.md" "$CARD/rtsp-setup/licenses/"
+
+# the licence text of everything in the package goes with it; stop if one is missing
+licence() {  # <path under licenses/> <source file>
+    [ -f "$2" ] || { echo "missing licence text: $2" >&2; exit 1; }
+    mkdir -p "$CARD/rtsp-setup/licenses/$(dirname "$1")"
+    cp "$2" "$CARD/rtsp-setup/licenses/$1"
+}
+B=$O/build
+TOOLS=$O/installer-tools/src
+licence linux/COPYING "$B/linux-custom/COPYING"
+licence busybox/LICENSE "$B"/busybox-[0-9]*/LICENSE
+licence busybox/LICENSE-bzip2 "$B"/busybox-[0-9]*/archival/libarchive/bz/LICENSE
+licence dropbear/LICENSE "$B"/dropbear-[0-9]*/LICENSE
+licence dropbear/LICENSE-libtommath "$B"/dropbear-[0-9]*/libtommath/LICENSE
+licence dropbear/LICENSE-libtomcrypt "$B"/dropbear-[0-9]*/libtomcrypt/LICENSE
+licence ipcd/LICENSE "$B"/ipcd-[0-9a-f]*/LICENSE
+licence libnl/COPYING "$B"/libnl-[0-9]*/COPYING
+licence uclibc-ng/COPYING.LIB "$B"/libnl-[0-9]*/COPYING  # the same LGPL-2.1 text
+licence wpa_supplicant/README "$B"/wpa_supplicant-[0-9]*/README
+licence squashfs-tools/COPYING "$TOOLS"/squashfs-tools-[0-9]*/COPYING
+licence zlib/LICENSE "$TOOLS"/zlib-[0-9]*/LICENSE
+
 find "$CARD" -name '*.sh' -exec sed -i 's/\r$//' {} +
 
 ZIP=$DIST/gt1pro-rtsp-sdcard-$VERSION.zip

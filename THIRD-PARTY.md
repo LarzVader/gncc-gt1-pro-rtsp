@@ -1,9 +1,10 @@
 # Third-party software
 
 The work in this project (installer, board and init scripts, patches, documentation) is MIT,
-see `LICENSE`. The SD card package also holds software by others. Each release has a source
-bundle `gt1pro-rtsp-sources-<version>.tar` with the source of everything in it that asks for
-that, and `installer/make-sources.sh` is what puts the bundle together.
+see `LICENSE`. The SD card package also holds software by others, with their licence texts in
+`rtsp-setup/licenses/` on the card. Each release has a source bundle
+`gt1pro-rtsp-sources-<version>.tar` with the source of everything in it that asks for that, and
+`installer/make-sources.sh` is what puts the bundle together.
 
 ## In the firmware the camera builds
 

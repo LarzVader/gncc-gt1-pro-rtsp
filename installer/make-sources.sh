@@ -56,6 +56,7 @@ cp "$REPO/package/ipcd/"*.patch "$B/ipcd/"
 
 cp "$REPO/configs/gncc_gt1pro_defconfig" "$B/"
 cp "$REPO/THIRD-PARTY.md" "$B/README.md"
+cp "$REPO/LICENSE" "$B/LICENSE-this-project.txt"
 
 TAR=$DIST/gt1pro-rtsp-sources-$VERSION.tar
 tar $TAROPTS -C "$DIST" -cf "$TAR" "gt1pro-rtsp-sources-$VERSION"
