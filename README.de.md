@@ -98,9 +98,8 @@ Unter `http://<kamera>/` gibt es außerdem eine kleine Webseite, mit demselben B
 - **RTSP läuft nur über TCP.** Eine Anfrage nach UDP bekommt `461 Unsupported Transport`, und ffmpeg, VLC und
   die anderen wechseln dann von selbst auf TCP. Über WLAN würde UDP nur Pakete verlieren. `rtsp_udp = 1` in
   `ipcd.conf` erlaubt UDP trotzdem.
-- **Die Uhr geht falsch**, wenn es in deinem Netz keinen NTP-Server gibt, weil die Kamera nicht ins Internet
-  kommt. Hast du einen, trag ihn in `settings.txt` unter `NTP_SERVER` ein. Auf das Video hat das keinen
-  Einfluss.
+- **Die Uhr geht falsch**, weil die Kamera nicht ins Internet kommt und die Firmware keinen NTP-Client
+  hat. Auf das Video hat das keinen Einfluss.
 - **Nachtbilder sind schwarz-weiß.** Infrarotlicht hat keine Farbe, die der Sensor zeigen könnte, nur einen
   Lila-Stich. Darum nimmt die Firmware die Farbe heraus. Sobald die Kamera auf Tag schaltet, kommt sie von selbst zurück.
 - **Drück die Reset-Taste nicht im laufenden Betrieb.** Sie ist nur für die Rettung beim Einschalten gedacht.
