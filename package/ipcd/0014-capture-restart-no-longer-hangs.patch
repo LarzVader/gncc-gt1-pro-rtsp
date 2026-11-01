@@ -1,0 +1,1009 @@
+ipcd: a capture restart no longer hangs
+
+New stream settings from the web page, an IP address lost for more than 20
+seconds and new Wi-Fi settings while online all stop and start the capture. The
+stop waited for the watchdog thread, which since 63e72fb runs for as long as the
+process does, so it never came back. The stream stayed away until someone pulled
+the plug, and as the thread went on feeding, the watchdog did not help either.
+
+Nobody waits for that thread now, and the next start leaves it running. With the
+restart working, the paths around it matter too:
+
+- The stop waits 60 seconds at most. Then the feeding ends and the watchdog restarts
+  the camera, so that a stop hanging in an SDK call cannot have the same result again.
+- A restart from the web page is one step for the main loop, which could otherwise
+  see the capture stopped and start a second one. It takes the settings when its turn
+  comes, so that the last of two quick changes wins, and changes saved while it waits
+  need no restart of their own. Saving no longer trips over a second save. cap_run is
+  set before the supervisor starts, as a stop right after a start would otherwise get
+  lost.
+- After an error in the supervisor, capture_is_running() says so, and the main loop
+  really starts a new capture. capture_start() used to return at once, as the old
+  one still counted as started. If no stream could start, the supervisor gives up
+  as well, so that the main loop tries again. That heals a passing error. A lasting
+  one still means no picture and a fed watchdog, with a new try every few seconds.
+- RTSP clients are disconnected at once. Nothing woke their threads, so they outlived
+  the restart and kept the connection open without ever sending a picture again. A
+  thread stuck in a send can sleep through the whole restart, so besides the flag,
+  which the next start clears, it now looks at a counter.
+- The web page refuses an RTSP port that something else listens on. The capture could
+  not start on it, again and again.
+- rtsp_server_shutdown() no longer joins an accept thread that never started, as
+  after a failed bind.
+- The pools take the whole DMA reservation, and after a stop the kernel can still be
+  clearing the old ones, at idle priority. So activate is tried for up to 5 seconds
+  before the start counts as failed.
+- udhcpc gets -b as everywhere else. Without a lease it never returned, so after a
+  lost address the main loop stood still while the watchdog was being fed.
+- Starting the capture loads the sensor configuration again, which undoes the writes
+  in /etc/config/sensor.init. They now follow at once, as the loop in S60ipcd can
+  take a minute, and until then the picture can be upside down.
+- With IR detection on, a day or night mode forced by hand stays over a restart.
+- The snapshot code uses the encoder number the SDK gave it. With the main stream off
+  the number 2 was wrong, the channel stayed open and in the way of the next start.
+- The frame rate is limited to 30. The web page offered 60, but from about 35 no stream
+  delivers a picture, on the GT1 Pro and on the GC3. It refuses a higher value now, and
+  one in a saved configuration counts as 30.
+
+--- a/src/ipcd/src/cap_pipeline.c
++++ b/src/ipcd/src/cap_pipeline.c
+@@ -73,6 +73,7 @@
+ #include <getopt.h>
+ #include <sys/ioctl.h>
+ #include <linux/watchdog.h>
++#include <sys/reboot.h>
+ 
+ #include "ipcd.h"
+ 
+@@ -620,6 +621,7 @@
+     int                active;
+     pthread_t          tid;
+     int                started;
++    volatile sig_atomic_t failed;   /* gave up before its first frame */
+ };
+ 
+ static struct stream_ctx g_streams[2];
+@@ -650,9 +652,9 @@
+     if (interval < 1) interval = 1;
+     fprintf(stderr, "[wdt] feeding every %ds (timeout %ds)\n", interval, timeout);
+     /* Feed for as long as the process runs, not only while capture is up:
+-     * a capture restart (e.g. day/night chroma switch) sets cap_run = 0,
+-     * and the Anyka watchdog ignores magic close, so stopping here
+-     * resets the board 10 s later. */
++     * a capture restart (e.g. new stream settings) sets cap_run = 0, and
++     * the Anyka watchdog ignores magic close, so stopping here resets the
++     * board 10 s later. So nobody may wait for this thread to end. */
+     while (!wdt_quit) {
+         if (ioctl(g_wdt_fd, WDIOC_KEEPALIVE, 0) < 0)
+             fprintf(stderr, "[wdt] keepalive: %s\n", strerror(errno));
+@@ -667,6 +669,7 @@
+ 
+ static void wdt_start(void)
+ {
++    if (g_wdt_started) return;  /* still running from before a capture restart */
+     if (!G_cfg.feed_watchdog) return;
+     g_wdt_fd = open(WDT_DEVICE, O_WRONLY);
+     if (g_wdt_fd < 0) {
+@@ -775,6 +778,7 @@
+     int rc = ak_venc_open(&ep, &s->venc_id);
+     if (rc != 0) {
+         fprintf(stderr, "[s%d] ak_venc_open failed: 0x%x\n", s->idx, rc);
++        s->failed = 1;
+         return NULL;
+     }
+     fprintf(stderr, "[s%d] ak_venc_open OK -> venc_id=%d\n", s->idx, s->venc_id);
+@@ -801,6 +805,7 @@
+     if (rc != 0) {
+         fprintf(stderr, "[s%d] ak_app_video_bind_chn failed: 0x%x\n", s->idx, rc);
+         ak_venc_close(s->venc_id);
++        s->failed = 1;
+         return NULL;
+     }
+     s->bound = 1;
+@@ -812,6 +817,7 @@
+         fprintf(stderr, "[s%d] set_dst_chn_active(1) failed: 0x%x\n", s->idx, rc);
+         ak_app_video_unbind_chn(&s->src, &s->dst);
+         ak_venc_close(s->venc_id);
++        s->failed = 1;
+         return NULL;
+     }
+     s->active = 1;
+@@ -1047,6 +1053,9 @@
+  * reservation: 28 MB of pools on the GK2's 20 MB region activates
+  * fine, then the encoders write past its end and the board crashes
+  * seconds after capture starts. So read the size from the device tree. */
++#define MEM_POOL_TRIES    17    /* about 5 s */
++#define MEM_POOL_WAIT_MS  300
++
+ static int mem_pool_init(void)
+ {
+     static const struct { unsigned int venc, vi; const char *what; } sizes[] = {
+@@ -1060,17 +1069,30 @@
+         if (res && sizes[i].venc + sizes[i].vi <= res) { pick = i; break; }
+     fprintf(stderr, "[mem] DT dma_reserved = %#x -> %s\n", res, sizes[pick].what);
+ 
+-    fprintf(stderr, "[mem] ak_mem_init(0)\n");
+-    int rc = ak_mem_init(0);
+-    if (rc != 0) {
+-        fprintf(stderr, "[mem] ak_mem_init failed: 0x%x\n", rc);
+-        return -1;
++    /* The pools take all of the reservation, and right after a stop the
++     * kernel can still be clearing the old ones (ion frees them later, in
++     * a thread at idle priority). Activate fails until that is done, and
++     * it must not be repeated without the exit calls: it would ask for
++     * the sum of the pools twice. */
++    for (int tries = 1; ; tries++) {
++        fprintf(stderr, "[mem] ak_mem_init(0)\n");
++        int rc = ak_mem_init(0);
++        if (rc != 0) {
++            fprintf(stderr, "[mem] ak_mem_init failed: 0x%x\n", rc);
++            return -1;
++        }
++        if (mem_pool_try(sizes[pick].venc, sizes[pick].vi) == 0) break;
++        ak_mem_dma_pool_exit();
++        ak_mem_exit();
++        if (tries >= MEM_POOL_TRIES || !cap_run) return -1;
++        usleep(MEM_POOL_WAIT_MS * 1000);
+     }
+-    if (mem_pool_try(sizes[pick].venc, sizes[pick].vi) != 0) return -1;
+     fprintf(stderr, "[mem] dma pool ready (%s)\n", sizes[pick].what);
+     return 0;
+ }
+ 
++#define SENSOR_INIT_PATH  "/etc/config/sensor.init"
++
+ static int vi_init(void)
+ {
+     int rc;
+@@ -1473,6 +1495,13 @@
+         }
+     }
+ 
++    /* Register writes for this camera, e.g. flip and mirror. Loading the
++     * sensor config undid them, and the loop in S60ipcd can take a minute. */
++    if (access(SENSOR_INIT_PATH, R_OK) == 0) {
++        int si = system("sh " SENSOR_INIT_PATH " >/dev/null 2>&1");
++        fprintf(stderr, "[sensor] %s rc=%d\n", SENSOR_INIT_PATH, si);
++    }
++
+     fprintf(stderr, "[vi] ready (main=%d sub=%d)\n",
+             g_vi_chn_main_enabled, g_vi_chn_sub_enabled);
+     return 0;
+@@ -1496,10 +1525,14 @@
+ /* Single supervisor thread runs the equivalent of the old main(). It
+  * blocks until cap_run goes 0, then tears down. capture_stop() flips
+  * cap_run and joins; if the supervisor wedged in some lib call, we
+- * don't kill -9 it (would corrupt the SDK), we wait. */
++ * don't kill -9 it (would corrupt the SDK), we wait for a minute and
++ * then restart the camera. */
+ static pthread_t   g_cap_super_tid;
+ static int         g_cap_super_started = 0;
+ static int         g_cap_super_failed  = 0;
++static volatile sig_atomic_t g_cap_super_done = 0;
++/* Held across a whole stop or restart, see capture_restart(). */
++static pthread_mutex_t g_cap_ctl = PTHREAD_MUTEX_INITIALIZER;
+ 
+ void capture_cfg_defaults(struct capture_cfg *cfg)
+ {
+@@ -1527,13 +1560,25 @@
+ 
+ int capture_is_running(void)
+ {
+-    return g_cap_super_started && !g_cap_super_failed;
++    pthread_mutex_lock(&g_cap_ctl);
++    int running = g_cap_super_started && !g_cap_super_failed;
++    pthread_mutex_unlock(&g_cap_ctl);
++    return running;
+ }
+ 
+ /* Translate the public capture_cfg into the module-local G_cfg/g_streams
+  * before kicking the pipeline up. Caller holds nothing. */
+ static void apply_cfg(const struct capture_cfg *cfg)
+ {
++    /* From about 35 frames a second no stream delivers, whether its encoder
++     * opens or not. The web page used to offer 60, so a saved config can
++     * still have that. */
++    int fps = cfg->fps > 0 ? cfg->fps : DEFAULT_FPS;
++    if (fps > CAP_MAX_FPS) {
++        fprintf(stderr, "[cap] fps %d is too high, using %d\n", fps, CAP_MAX_FPS);
++        fps = CAP_MAX_FPS;
++    }
++
+     G_cfg.sensor_config = cfg->sensor_cfg_path ? cfg->sensor_cfg_path
+                                                : DEFAULT_SENSOR_CONFIG;
+     G_cfg.rtsp_port     = cfg->rtsp_port > 0 ? cfg->rtsp_port : DEFAULT_RTSP_PORT;
+@@ -1548,21 +1593,23 @@
+     G_cfg.no_sharpen    = cfg->no_sharpen;
+ 
+     g_streams[0].idx       = 0;
++    g_streams[0].failed    = 0;
+     g_streams[0].vi_chn_id = 0;
+     /* 0 means "not specified": resolved to the sensor's native size once
+      * it is known (see the auto-detect block further down). */
+     g_streams[0].width     = cfg->main_w;
+     g_streams[0].height    = cfg->main_h;
+-    g_streams[0].fps       = cfg->fps      > 0 ? cfg->fps      : DEFAULT_FPS;
++    g_streams[0].fps       = fps;
+     g_streams[0].gop_sec   = cfg->gop_sec  > 0 ? cfg->gop_sec  : DEFAULT_GOP_SEC;
+     g_streams[0].kbps      = cfg->main_kbps> 0 ? cfg->main_kbps: DEFAULT_MAIN_KBPS;
+     g_streams[0].codec     = G_cfg.main_codec;
+ 
+     g_streams[1].idx       = 1;
++    g_streams[1].failed    = 0;
+     g_streams[1].vi_chn_id = 1;
+     g_streams[1].width     = cfg->sub_w    > 0 ? cfg->sub_w    : DEFAULT_SUB_W;
+     g_streams[1].height    = cfg->sub_h    > 0 ? cfg->sub_h    : DEFAULT_SUB_H;
+-    g_streams[1].fps       = cfg->fps      > 0 ? cfg->fps      : DEFAULT_FPS;
++    g_streams[1].fps       = fps;
+     g_streams[1].gop_sec   = cfg->gop_sec  > 0 ? cfg->gop_sec  : DEFAULT_GOP_SEC;
+     g_streams[1].kbps      = cfg->sub_kbps > 0 ? cfg->sub_kbps : DEFAULT_SUB_KBPS;
+     g_streams[1].codec     = G_cfg.sub_codec;
+@@ -1579,7 +1626,7 @@
+                          cfg->sub_codec);
+ }
+ 
+-static void *cap_supervisor(void *arg)
++static void *cap_supervisor_run(void *arg)
+ {
+     struct capture_cfg cfg;
+     memcpy(&cfg, arg, sizeof(cfg));
+@@ -1590,7 +1637,6 @@
+     /* No signal trapping: netmgr owns SIGTERM/SIGINT. We rely on
+      * cap_run being flipped externally via capture_stop(). The
+      * legacy install_signals() is intentionally not called here. */
+-    cap_run = 1;
+ 
+     fprintf(stderr, "[cap] starting, RTSP port=%d, main=%s, sub=%s\n",
+             G_cfg.rtsp_port,
+@@ -1600,13 +1646,12 @@
+     if (mem_pool_init() < 0) {
+         fprintf(stderr, "[cap] mem_pool_init failed\n");
+         g_cap_super_failed = 1;
+-        if (g_wdt_started) { cap_run = 0; pthread_join(g_wdt_tid, NULL); }
+         return NULL;
+     }
+     if (vi_init() < 0) {
+         fprintf(stderr, "[cap] vi_init failed\n");
+         g_cap_super_failed = 1;
+-        if (g_wdt_started) { cap_run = 0; pthread_join(g_wdt_tid, NULL); }
++        vi_deinit();
+         ak_mem_dma_pool_exit();
+         ak_mem_exit();
+         return NULL;
+@@ -1615,7 +1660,9 @@
+     /* Arm the watchdog only once VI is up. Bringing up a large sensor
+      * (2304x1296 + 28 MB of DMA pools) keeps the CPU in the kernel for
+      * longer than the 10 s hardware timeout, so the feeder thread
+-     * cannot run and the SoC resets mid-startup. */
++     * cannot run and the SoC resets mid-startup. That is the first start
++     * after power-on: on a capture restart the thread is already running,
++     * and the cameras come through. */
+     wdt_start();
+ 
+     enum rtsp_codec codecs[RTSP_MAX_STREAMS] = {
+@@ -1676,11 +1723,23 @@
+             "[cap] sub stream disabled — snapshots also disabled\n");
+     }
+ 
+-    /* Block until capture_stop() flips cap_run. */
+-    while (cap_run) sleep(1);
++    /* Block until capture_stop() flips cap_run, or until no stream is left:
++     * a capture without a picture would only keep the watchdog fed. One
++     * failed stream leaves the other one alone. */
++    while (cap_run) {
++        if ((cfg.enable_main || cfg.enable_sub) &&
++            (!g_streams[0].started || g_streams[0].failed) &&
++            (!g_streams[1].started || g_streams[1].failed)) {
++            fprintf(stderr, "[cap] no stream could start\n");
++            break;
++        }
++        sleep(1);
++    }
+ 
+ cleanup:
+     fprintf(stderr, "[cap] shutdown\n");
++    /* cap_run still set: an error brought us here, not capture_stop() */
++    if (cap_run) g_cap_super_failed = 1;
+     cap_run = 0;
+ 
+     /* Snapshot must be torn down before we destroy the VI sub
+@@ -1703,14 +1762,19 @@
+     vi_deinit();
+     ak_mem_dma_pool_exit();
+     ak_mem_exit();
+-    if (g_wdt_started) { pthread_join(g_wdt_tid, NULL); g_wdt_started = 0; }
+ 
+     fprintf(stderr, "[cap] bye\n");
+-    g_cap_super_failed = 0;
+     return NULL;
+ }
+ 
+-int capture_start(const struct capture_cfg *cfg_in)
++static void *cap_supervisor(void *arg)
++{
++    void *ret = cap_supervisor_run(arg);
++    g_cap_super_done = 1;
++    return ret;
++}
++
++static int capture_start_locked(const struct capture_cfg *cfg_in)
+ {
+     if (g_cap_super_started) return 0;
+ 
+@@ -1720,6 +1784,8 @@
+     else        capture_cfg_defaults(heap);
+ 
+     g_cap_super_failed = 0;
++    g_cap_super_done = 0;
++    cap_run = 1;
+     if (pthread_create(&g_cap_super_tid, NULL, cap_supervisor, heap) != 0) {
+         free(heap);
+         return -1;
+@@ -1727,6 +1793,14 @@
+     g_cap_super_started = 1;
+     return 0;
+ }
++
++int capture_start(const struct capture_cfg *cfg_in)
++{
++    pthread_mutex_lock(&g_cap_ctl);
++    int rc = capture_start_locked(cfg_in);
++    pthread_mutex_unlock(&g_cap_ctl);
++    return rc;
++}
+ /* Picture without colour at night, done in the ISP: color=1 (day), color=0
+  * (night).
+  *
+@@ -1786,14 +1860,72 @@
+ out:
+     pthread_mutex_unlock(&lock);
+ }
+-void capture_stop(void)
++/* How long a stop may take before we give up on the SDK and restart the
++ * camera. Waiting on would leave it without a picture until someone pulls
++ * the plug, as the watchdog thread goes on feeding. */
++#define CAP_STOP_TIMEOUT_S  60
++
++static void capture_stop_locked(void)
+ {
+     if (!g_cap_super_started) return;
+     cap_run = 0;
++    for (int i = 0; i < CAP_STOP_TIMEOUT_S * 10 && !g_cap_super_done; i++)
++        usleep(100 * 1000);
++    if (!g_cap_super_done) {
++        /* Stop feeding first: whatever hangs next, the watchdog resets the
++         * board. reboot() switches it off before shutting down, so that is
++         * only for a camera without one. */
++        wdt_quit = 1;
++        fprintf(stderr, "[cap] shutdown still hangs after %d s, restarting the camera\n",
++                CAP_STOP_TIMEOUT_S);
++        sync();
++        sleep(20);
++        reboot(RB_AUTOBOOT);
++        for (;;) sleep(60);
++    }
+     pthread_join(g_cap_super_tid, NULL);
+     g_cap_super_started = 0;
+ }
+ 
++void capture_stop(void)
++{
++    pthread_mutex_lock(&g_cap_ctl);
++    capture_stop_locked();
++    pthread_mutex_unlock(&g_cap_ctl);
++}
++
++/* A restart reads the settings only after its stop, so one that has not got
++ * there yet covers every change saved so far. Returns 0 if there is one, and
++ * then the caller needs none of its own. */
++static pthread_mutex_t g_restart_mtx = PTHREAD_MUTEX_INITIALIZER;
++static int             g_restart_pending = 0;
++
++int capture_restart_request(void)
++{
++    pthread_mutex_lock(&g_restart_mtx);
++    int first = !g_restart_pending;
++    g_restart_pending = 1;
++    pthread_mutex_unlock(&g_restart_mtx);
++    return first;
++}
++
++/* Stop and start as one step: the main loop must not see the capture stopped
++ * in between, or it would start a second one. The settings are read here, as
++ * of two quick changes the second one may get here first. */
++int capture_restart(void)
++{
++    struct capture_cfg cfg;
++    pthread_mutex_lock(&g_cap_ctl);
++    capture_stop_locked();
++    pthread_mutex_lock(&g_restart_mtx);
++    g_restart_pending = 0;
++    pthread_mutex_unlock(&g_restart_mtx);
++    capture_cfg_get(&cfg);
++    int rc = capture_start_locked(&cfg);
++    pthread_mutex_unlock(&g_cap_ctl);
++    return rc;
++}
++
+ /* Re-apply only the live-tunable parameters of cfg.
+  *
+  * Currently a placeholder: the VENC SDK exposes ak_venc_set_attr()
+--- a/src/ipcd/src/cfgfile.c
++++ b/src/ipcd/src/cfgfile.c
+@@ -31,6 +31,7 @@
+ #include <fcntl.h>
+ #include <errno.h>
+ #include <strings.h>
++#include <pthread.h>
+ #include <sys/stat.h>
+ 
+ #include "ipcd.h"
+@@ -220,10 +221,8 @@
+ /* ---------------------------------------------------------------- */
+ /* Save                                                             */
+ /* ---------------------------------------------------------------- */
+-int ipcd_cfg_save(const struct capture_cfg *cfg)
++static int cfg_save_locked(const struct capture_cfg *cfg)
+ {
+-    if (!cfg) return -1;
+-
+     char tmp[sizeof(IPCD_CONF_PATH) + 8];
+     snprintf(tmp, sizeof(tmp), "%s.tmp", IPCD_CONF_PATH);
+ 
+@@ -303,6 +302,16 @@
+     return 0;
+ }
+ 
++int ipcd_cfg_save(const struct capture_cfg *cfg)
++{
++    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;   /* one .tmp file */
++    if (!cfg) return -1;
++    pthread_mutex_lock(&lock);
++    int rc = cfg_save_locked(cfg);
++    pthread_mutex_unlock(&lock);
++    return rc;
++}
++
+ /* ---------------------------------------------------------------- */
+ /* JSON for /api/config                                            */
+ /* ---------------------------------------------------------------- */
+--- a/src/ipcd/src/http_srv.c
++++ b/src/ipcd/src/http_srv.c
+@@ -44,21 +44,36 @@
+ /* 64 KB of stack, so we can't call it inline without risking a    */
+ /* stack overflow (Chrome shows ERR_CONNECTION_RESET). Instead we  */
+ /* dispatch the stop/start sequence to this detached thread, which */
+-/* runs on the default (full) stack. The HTTP response has already */
+-/* been sent before this thread touches anything. */
++/* runs on the default (full) stack. It leaves the connection alone, */
++/* so the HTTP response goes out as usual. */
+ static void *capture_restart_thread(void *arg)
+ {
+-    struct capture_cfg *cfg = arg;
++    (void)arg;
+     fprintf(stderr, "[http] async capture restart starting\n");
+     stats_sampler_stop();
+-    capture_stop();
+-    if (capture_start(cfg) == 0)
++    if (capture_restart() == 0)
+         stats_sampler_start();
+-    free(cfg);
+     fprintf(stderr, "[http] async capture restart done\n");
+     return NULL;
+ }
+ 
++/* Can the RTSP server bind this port, or does something else (this web */
++/* server, dropbear) listen on it? */
++static int rtsp_port_free(int port)
++{
++    int fd = socket(AF_INET, SOCK_STREAM, 0);
++    if (fd < 0) return 1;   /* can't tell */
++    int one = 1;
++    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
++    struct sockaddr_in addr = {0};
++    addr.sin_family      = AF_INET;
++    addr.sin_addr.s_addr = htonl(INADDR_ANY);
++    addr.sin_port        = htons((uint16_t)port);
++    int ok = bind(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0;
++    close(fd);
++    return ok;
++}
++
+ /* ---------------------------------------------------------------- */
+ /* HTTP helpers                                                     */
+ /* ---------------------------------------------------------------- */
+@@ -711,7 +726,13 @@
+         char v[64];
+         if (form_get(body, "fps", v, sizeof(v)) == 0 && v[0]) {
+             int n = atoi(v);
+-            if (n > 0 && n <= 60) next.fps = n;
++            /* A saved value above the limit still comes back from the page
++             * and counts as the limit, so it must not block saving. */
++            if (n != cur.fps && (n < 1 || n > CAP_MAX_FPS)) {
++                send_json(fd, "{\"ok\":false,\"error\":\"the frame rate goes from 1 to 30\"}");
++                goto done;
++            }
++            next.fps = n;
+         }
+         if (form_get(body, "gop_sec", v, sizeof(v)) == 0 && v[0]) {
+             int n = atoi(v);
+@@ -727,6 +748,14 @@
+         }
+         if (form_get(body, "rtsp_port", v, sizeof(v)) == 0 && v[0]) {
+             int n = atoi(v);
++            /* The port we still listen on is free again before the restart
++             * that is on its way binds. */
++            if (n > 0 && n <= 65535 && n != cur.rtsp_port &&
++                n != rtsp_server_listen_port() && !rtsp_port_free(n)) {
++                /* The capture could not start on it, again and again. */
++                send_json(fd, "{\"ok\":false,\"error\":\"this RTSP port is in use\"}");
++                goto done;
++            }
+             if (n > 0 && n <= 65535) next.rtsp_port = n;
+         }
+         if (form_get(body, "enable_main", v, sizeof(v)) == 0 && v[0]) {
+@@ -813,8 +842,9 @@
+             goto done;
+         }
+ 
+-        /* If only IR thresholds changed, we're done — they're live. */
+-        if (needs_restart) {
++        /* If only IR thresholds changed, we're done — they're live. A
++         * restart still on its way covers this change as well. */
++        if (needs_restart && capture_restart_request()) {
+             /* capture_stop() blocks while joining the supervisor and
+              * RTSP threads, which can easily consume 20-30 KB of
+              * stack with their sub-frames.  This HTTP handler runs
+@@ -822,33 +852,26 @@
+              * doing the stop/start inline causes a stack overflow
+              * (seen as ERR_CONNECTION_RESET in Chrome's devtools).
+              *
+-             * Fix: copy next into a heap-allocated struct and hand
+-             * it to a detached thread with the default stack size
+-             * (uClibc default: 2 MB, more than enough). The HTTP
+-             * response is sent *before* the restart so the browser
+-             * gets a clean 200 instead of a reset. */
+-            struct capture_cfg *heap = malloc(sizeof(*heap));
+-            if (heap) {
+-                *heap = next;
+-                pthread_t rtid;
+-                pthread_attr_t rattr;
+-                pthread_attr_init(&rattr);
+-                pthread_attr_setdetachstate(&rattr, PTHREAD_CREATE_DETACHED);
+-                /* Default stack — do NOT call setstacksize here. */
+-                if (pthread_create(&rtid, &rattr,
+-                        capture_restart_thread, heap) != 0) {
+-                    free(heap);
+-                    /* Fall back to inline restart (may RST the conn,
+-                     * but at least the config is saved). */
+-                    fprintf(stderr,
+-                        "[http] restart thread spawn failed, "
+-                        "falling back to inline restart\n");
+-                    stats_sampler_stop();
+-                    capture_stop();
+-                    if (capture_start(&next) == 0) stats_sampler_start();
+-                }
+-                pthread_attr_destroy(&rattr);
++             * Fix: hand it to a detached thread with the default stack
++             * size (uClibc default: 2 MB, more than enough). The browser
++             * gets a clean 200 instead of a reset, as that thread leaves
++             * the connection alone. */
++            pthread_t rtid;
++            pthread_attr_t rattr;
++            pthread_attr_init(&rattr);
++            pthread_attr_setdetachstate(&rattr, PTHREAD_CREATE_DETACHED);
++            /* Default stack — do NOT call setstacksize here. */
++            if (pthread_create(&rtid, &rattr,
++                    capture_restart_thread, NULL) != 0) {
++                /* Fall back to inline restart (may RST the conn,
++                 * but at least the config is saved). */
++                fprintf(stderr,
++                    "[http] restart thread spawn failed, "
++                    "falling back to inline restart\n");
++                stats_sampler_stop();
++                if (capture_restart() == 0) stats_sampler_start();
+             }
++            pthread_attr_destroy(&rattr);
+         }
+ 
+         char resp[96];
+--- a/src/ipcd/src/ir.c
++++ b/src/ipcd/src/ir.c
+@@ -385,13 +385,14 @@
+         IR_POLL_PERIOD_MS, IR_NIGHT_CONFIRM_HITS);
+ 
+     I.initialized = 1;
+-    I.mode        = IR_MODE_AUTO;
+-    I.cur_level   = 0;
++    /* A mode forced by hand stays over a capture restart. */
++    if (I.mode == IR_MODE_AUTO) I.cur_level = 0;
++    int start_level = I.cur_level;
+     I.cur_luma    = 0;
+     pthread_mutex_unlock(&I.mtx);
+ 
+-    /* Start in day-mode safely (LED off, filter to day). */
+-    hw_apply(0);
++    /* Start in day-mode safely (LED off, filter to day), unless night is forced. */
++    hw_apply(start_level);
+ 
+     I.poll_run = 1;
+     if (pthread_create(&I.poll_tid, NULL, poll_thread, NULL) != 0) {
+--- a/src/ipcd/src/main.c
++++ b/src/ipcd/src/main.c
+@@ -257,15 +257,18 @@
+ 
+ /* Replace the current capture config and persist it to disk.
+  * Returns 0 on success. The caller is responsible for calling
+- * capture_stop() + capture_start() afterwards if any non-runtime
+- * field changed (codec, fps, enable_*, rtsp_port, sensor_cfg). */
++ * capture_restart() afterwards if any non-runtime field changed
++ * (codec, fps, enable_*, rtsp_port, sensor_cfg). */
+ int capture_cfg_set(const struct capture_cfg *in)
+ {
+     if (!in) return -1;
++    /* Saved under the lock, so that the file ends up with the last of two
++     * quick changes too. */
+     pthread_mutex_lock(&g_capture_cfg_mtx);
+     g_capture_cfg = *in;
++    int rc = ipcd_cfg_save(in);
+     pthread_mutex_unlock(&g_capture_cfg_mtx);
+-    return ipcd_cfg_save(in);
++    return rc;
+ }
+ 
+ /* ---------------------------------------------------------------- */
+@@ -369,7 +372,8 @@
+         if (!capture_is_running()) {
+             fprintf(stderr, "[netmgr] capture not running, relaunching\n");
+             stats_sampler_stop();   /* stops cleanly even if not started */
+-            if (capture_start(&g_capture_cfg) == 0) stats_sampler_start();
++            /* restart, not start: the old one still counts as started */
++            if (capture_restart() == 0) stats_sampler_start();
+         }
+     }
+ 
+--- a/src/ipcd/src/rtsp_server.c
++++ b/src/ipcd/src/rtsp_server.c
+@@ -725,6 +725,7 @@
+ 
+ /* Forward decl — defined together with the listen socket below. */
+ static volatile int g_shutdown;
++static volatile unsigned g_shutdown_count;  /* see serve_client() */
+ 
+ /*
+  * RTSP messages are textual, looking very much like HTTP/1.1:
+@@ -2485,14 +2486,18 @@
+     snprintf(c.peer_str, sizeof(c.peer_str), "%s", peer_str);
+ 
+     /* Reasonable IO timeouts so a misbehaving client can't hold us
+-     * forever. RTSP doesn't have a fixed message rate but a 10s
+-     * recv timeout matches typical keepalive intervals. */
+-    struct timeval tv = { .tv_sec = 60, .tv_usec = 0 };
++     * forever. The loop below just carries on after a recv timeout, so
++     * that one only decides how soon it sees a shutdown. */
++    struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+     setsockopt(conn_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+     tv.tv_sec = 10;
+     setsockopt(conn_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+ 
+-    while (!g_shutdown) {
++    /* A thread stuck in a send can sleep through a whole capture restart,
++     * until the next start has cleared g_shutdown. The counter still tells. */
++    unsigned shutdowns = g_shutdown_count;
++
++    while (!g_shutdown && shutdowns == g_shutdown_count) {
+         /* If state went back to CS_INIT (TEARDOWN), close. */
+         if (c.state == CS_INIT && c.session_id[0]) break;
+ 
+@@ -2527,6 +2532,9 @@
+     }
+ 
+ done:
++    /* Wakes a streamer stuck in send(). And the client gets its FIN even if
++     * a child process inherited the socket, which close() alone would not do. */
++    shutdown(conn_fd, SHUT_RDWR);
+     if (c.streamer_started) {
+         c.state = CS_INIT;
+         pthread_join(c.streamer_tid, NULL);
+@@ -2550,6 +2558,8 @@
+ 
+ static int             g_listen_fd  = -1;
+ static pthread_t       g_accept_tid;
++static int             g_accept_started = 0;
++static volatile int    g_listen_port = 0;
+ static int             g_client_count = 0;     /* atomic via g_client_mtx */
+ static pthread_mutex_t g_client_mtx = PTHREAD_MUTEX_INITIALIZER;
+ 
+@@ -2649,9 +2659,6 @@
+      * via /api/config). Without this, the previous shutdown left
+      * g_shutdown=1 and the new accept_loop would exit immediately. */
+     g_shutdown = 0;
+-    pthread_mutex_lock(&g_client_mtx);
+-    g_client_count = 0;
+-    pthread_mutex_unlock(&g_client_mtx);
+ 
+     /* Initialize per-stream rings with their codec. */
+     for (int i = 0; i < RTSP_MAX_STREAMS; i++)
+@@ -2687,13 +2694,16 @@
+         return -1;
+     }
+     g_listen_fd = fd;
++    g_listen_port = listen_port;
+ 
+     if (pthread_create(&g_accept_tid, NULL, accept_loop, NULL) != 0) {
+         fprintf(stderr, "[rtsp] cannot start acceptor thread\n");
+         close(fd);
+         g_listen_fd = -1;
++        g_listen_port = 0;
+         return -1;
+     }
++    g_accept_started = 1;
+ 
+     fprintf(stderr, "[rtsp] listening on tcp/%d "
+                     "(streams: main=%s, sub=%s)\n",
+@@ -2707,14 +2717,25 @@
+ 
+ void rtsp_server_shutdown(void)
+ {
++    g_shutdown_count++;
+     g_shutdown = 1;
++    /* Streamers are waiting for an AU that will not come. */
++    for (int i = 0; i < RTSP_MAX_STREAMS; i++) {
++        pthread_mutex_lock(&g_rings[i].mtx);
++        pthread_cond_broadcast(&g_rings[i].cond);
++        pthread_mutex_unlock(&g_rings[i].mtx);
++    }
+     if (g_listen_fd >= 0) {
+         /* Close the listen socket to wake accept(). */
+         shutdown(g_listen_fd, SHUT_RDWR);
+         close(g_listen_fd);
+         g_listen_fd = -1;
++        g_listen_port = 0;
++    }
++    if (g_accept_started) {
++        pthread_join(g_accept_tid, NULL);
++        g_accept_started = 0;
+     }
+-    pthread_join(g_accept_tid, NULL);
+ 
+     /* Now wait (briefly) for any in-flight client_thread to drain.
+      * They observe g_shutdown via the streamer loop's
+@@ -2755,6 +2776,11 @@
+ /* Single-client policy means this is 0 or 1, but exposing it as a count */
+ /* keeps the API future-proof for when we lift that limit.               */
+ /* ====================================================================== */
++int rtsp_server_listen_port(void)
++{
++    return g_listen_port;
++}
++
+ int rtsp_server_active_clients(void)
+ {
+     int n;
+--- a/src/ipcd/src/snapshot.c
++++ b/src/ipcd/src/snapshot.c
+@@ -182,6 +182,10 @@
+ 
+     sn_state_t       state;
+     int              vi_chn_id;      /* set by snapshot_init */
++    /* Only the encoder thread touches these two. The SDK hands out the
++     * first free slot, so the number depends on what else is open. */
++    int              venc_id;
++    int              channel_open;
+     int              consecutive_fails;
+ 
+     /* "Pending request" flag: set by snapshot_get_jpeg, cleared by
+@@ -301,18 +305,15 @@
+ 
+     /* Stash the active venc_id in shared state. The .chn_id we'll
+      * use when pulling stream is the same. */
+-    g_sn.vi_chn_id = g_sn.vi_chn_id;  /* unchanged */
+-    /* We don't track venc_id in sn_t separately because we always
+-     * use SNAPSHOT_VENC_ID — but keep this comment as a reminder
+-     * that if the SDK starts reassigning, we must update.
+-     */
++    g_sn.venc_id = venc_id;
++    g_sn.channel_open = 1;
+     return 0;
+ }
+ 
+ static void jpeg_channel_close(void)
+ {
+     struct sn_chn src = { SNAPSHOT_VI_SRC_TYPE,    g_sn.vi_chn_id };
+-    struct sn_chn dst = { SNAPSHOT_VENC_DST_TYPE,  SNAPSHOT_VENC_ID };
++    struct sn_chn dst = { SNAPSHOT_VENC_DST_TYPE,  g_sn.venc_id };
+ 
+     /* Order: deactivate -> unbind -> close. */
+     int rc = ak_app_video_set_dst_chn_active(&dst, 0);
+@@ -323,10 +324,11 @@
+     if (rc != 0) {
+         fprintf(stderr, "[snap] unbind VI->JPEG rc=0x%x\n", rc);
+     }
+-    rc = ak_venc_close(SNAPSHOT_VENC_ID);
++    rc = ak_venc_close(g_sn.venc_id);
+     if (rc != 0) {
+         fprintf(stderr, "[snap] ak_venc_close(JPEG) rc=0x%x\n", rc);
+     }
++    g_sn.channel_open = 0;
+     fprintf(stderr, "[snap] JPEG channel closed\n");
+ }
+ 
+@@ -345,7 +347,7 @@
+      * inside the kernel waiting for the next encoded frame. */
+     pthread_mutex_unlock(&g_sn.mtx);
+ 
+-    struct sn_chn dst = { SNAPSHOT_VENC_DST_TYPE, SNAPSHOT_VENC_ID };
++    struct sn_chn dst = { SNAPSHOT_VENC_DST_TYPE, g_sn.venc_id };
+     struct sn_video_stream vs;
+     long deadline = now_ms() + 1500;     /* 1.5s to grab a frame */
+ 
+@@ -361,7 +363,7 @@
+             jpeg_len = vs.len;
+             jpeg_buf = malloc(jpeg_len);
+             if (jpeg_buf) memcpy(jpeg_buf, vs.data, jpeg_len);
+-            ak_venc_release_stream(SNAPSHOT_VENC_ID, &vs);
++            ak_venc_release_stream(g_sn.venc_id, &vs);
+             if (!jpeg_buf) {
+                 /* OOM. Treat as a transient error. */
+                 pthread_mutex_lock(&g_sn.mtx);
+@@ -519,8 +521,8 @@
+         pthread_cond_wait(&g_sn.request_cv, &g_sn.mtx);
+     }
+ 
+-    /* Shutdown: if channel is open, close it. */
+-    if (g_sn.state == SN_STATE_CHANNEL_OPEN) {
++    /* Shutdown: if channel is open, close it. DEAD can have it open too. */
++    if (g_sn.channel_open) {
+         pthread_mutex_unlock(&g_sn.mtx);
+         jpeg_channel_close();
+         pthread_mutex_lock(&g_sn.mtx);
+--- a/src/ipcd/src/stats.c
++++ b/src/ipcd/src/stats.c
+@@ -172,24 +172,35 @@
+     return NULL;
+ }
+ 
++/* The web page's capture restart and the main loop can both get here. */
++static pthread_mutex_t g_sampler_ctl = PTHREAD_MUTEX_INITIALIZER;
++
+ int stats_sampler_start(void)
+ {
+-    if (S.sampler_started) return 0;
+-    S.sampler_run = 1;
+-    if (pthread_create(&S.sampler_tid, NULL, sampler_thread, NULL) != 0) {
+-        S.sampler_run = 0;
+-        return -1;
++    int rc = 0;
++    pthread_mutex_lock(&g_sampler_ctl);
++    if (!S.sampler_started) {
++        S.sampler_run = 1;
++        if (pthread_create(&S.sampler_tid, NULL, sampler_thread, NULL) != 0) {
++            S.sampler_run = 0;
++            rc = -1;
++        } else {
++            S.sampler_started = 1;
++        }
+     }
+-    S.sampler_started = 1;
+-    return 0;
++    pthread_mutex_unlock(&g_sampler_ctl);
++    return rc;
+ }
+ 
+ void stats_sampler_stop(void)
+ {
+-    if (!S.sampler_started) return;
+-    S.sampler_run = 0;
+-    pthread_join(S.sampler_tid, NULL);
+-    S.sampler_started = 0;
++    pthread_mutex_lock(&g_sampler_ctl);
++    if (S.sampler_started) {
++        S.sampler_run = 0;
++        pthread_join(S.sampler_tid, NULL);
++        S.sampler_started = 0;
++    }
++    pthread_mutex_unlock(&g_sampler_ctl);
+ }
+ 
+ /* ---------------------------------------------------------------- */
+--- a/src/ipcd/src/wifi_ctrl.c
++++ b/src/ipcd/src/wifi_ctrl.c
+@@ -190,10 +190,11 @@
+      * data path needs ~3s to be reliable. Empirical. */
+     sleep(3);
+ 
+-    /* Get DHCP lease in background. -t 5: 5 retries, then give up.
+-     * Its lines go to syslog, which has its own limit: while it waits
+-     * for a lease here, nothing limits our log (see log_limit). */
+-    run_cmd("udhcpc -S -i %s -t 5 -T 3 -A 5 -x hostname:gt1pro >/dev/null 2>&1", STA_IFACE);
++    /* Get DHCP lease in background: after 5 tries udhcpc goes on by itself
++     * and try_sta decides how long that may take. Without -b it never came
++     * back without a lease, and the watchdog went on being fed.
++     * Its lines go to syslog, which has its own limit. */
++    run_cmd("udhcpc -b -S -i %s -t 5 -T 3 -A 5 -x hostname:gt1pro >/dev/null 2>&1", STA_IFACE);
+ 
+     return WIFI_STA_OK;
+ }
+--- a/src/ipcd/include/ipcd.h
++++ b/src/ipcd/include/ipcd.h
+@@ -128,6 +128,9 @@
+     CAP_CODEC_HEVC = 1,
+ } cap_codec_t;
+ 
++/* From about 35 frames a second no stream delivers, see apply_cfg(). */
++#define CAP_MAX_FPS  30
++
+ struct capture_cfg {
+     int           rtsp_port;
+     const char   *sensor_cfg_path;     /* NULL -> default */
+@@ -153,9 +156,9 @@
+ 
+ /* Replace the running config + persist to /etc/config/ipcd.conf.
+  * After this returns, callers wanting changes to take effect must
+- * also call capture_stop() + capture_start() (unless they only
+- * touched runtime-tunable fields, in which case capture_apply_runtime
+- * is enough). */
++ * also call capture_restart() (unless they only touched
++ * runtime-tunable fields, in which case capture_apply_runtime is
++ * enough). */
+ int  capture_cfg_set(const struct capture_cfg *in);
+ 
+ /* Start the whole VI/VENC + RTSP pipeline. Returns 0 on success.
+@@ -163,8 +166,17 @@
+ int  capture_start(const struct capture_cfg *cfg);
+ 
+ /* Tear everything down: VI, VENC, RTSP, HLS, stream workers.
+- * Blocks until threads have joined. */
++ * Blocks until threads have joined. If that takes longer than a
++ * minute, something in the SDK hangs and the camera restarts. */
+ void capture_stop(void);
++
++/* capture_stop() + capture_start() with the current settings, as one
++ * step for other threads. */
++int  capture_restart(void);
++
++/* Call after saving new settings. Returns 0 if a restart is on its way
++ * that will read them, otherwise the caller has to call capture_restart(). */
++int  capture_restart_request(void);
+ void cap_set_chroma(int color);
+ 
+ int  capture_is_running(void);
+@@ -212,6 +224,7 @@
+                          const size_t *nal_lens,
+                          int nal_count, enum rtsp_au_kind kind);
+ int  rtsp_server_active_clients(void);    /* used by /api/stats */
++int  rtsp_server_listen_port(void);       /* 0 if not listening; used by /api/config */
+ 
+ /* ---------------------------------------------------------------- */
+ /* IR / day-night automatic switching                              */
+--- a/src/ipcd/web/config.html
++++ b/src/ipcd/web/config.html
+@@ -167,8 +167,8 @@
+ 
+     <div class="field">
+       <label><span class="name">Frame rate<span class="tier tier-2">restart</span></span>
+-        <span class="desc">15 is the validated default for this sensor. 30 is risky on this SoC.</span></label>
+-      <input id="fps" type="number" min="1" max="60">
++        <span class="desc">1 to 30. 15 is the validated default for this sensor. 30 is risky on this SoC.</span></label>
++      <input id="fps" type="number" min="1" max="30">
+     </div>
+ 
+     <div class="field">
+@@ -250,7 +250,7 @@
+ 
+   <div class="legend">
+     <span class="tier tier-1">live</span> takes effect immediately ·
+-    <span class="tier tier-2">restart</span> interrupts streams for ~3 s ·
++    <span class="tier tier-2">restart</span> interrupts streams for ~10 s ·
+     <span class="tier tier-3">reboot</span> requires power cycle
+   </div>
+ 
+@@ -354,7 +354,7 @@
+     const r = await fetch('/api/config', { method: 'POST', body: fd });
+     const j = await r.json();
+     if (!r.ok || !j.ok) {
+-      showMsg('Save failed: HTTP ' + r.status, 'err');
++      showMsg('Save failed: ' + (j.error || 'HTTP ' + r.status), 'err');
+     } else if (j.restarted) {
+       showMsg('Saved. Capture is restarting — RTSP clients will reconnect in a few seconds.', 'warn');
+     } else {
