@@ -1,0 +1,117 @@
+ipcd: limit the log in RAM
+
+The start script points stdout and stderr at /tmp/ipcd.log, which is in RAM
+without a card, and nothing limits it. Each connection adds a line every 5
+seconds, about 0.8 MB a day. With two connections that never stop, the memory of
+a camera with 32 MB would run out after about 9 days.
+
+At 1 MB the file now becomes <file>.old and a new one starts, so the log takes at
+most about 2 MB and keeps the last hours. A log on a card stays as it is, and so
+do the lines per connection: they are what the cause of a stop can be read from.
+
+udhcpc now logs to syslog, which has its own limit. While it waits for a lease in
+the foreground, the main thread does not get to the check, and udhcpc would keep
+writing to the old file after a change.
+
+--- a/src/ipcd/src/main.c
++++ b/src/ipcd/src/main.c
+@@ -30,7 +30,10 @@
+ #include <time.h>
+ #include <getopt.h>
+ #include <pthread.h>
++#include <fcntl.h>
+ #include <sys/types.h>
++#include <sys/stat.h>
++#include <sys/vfs.h>
+ #include <sys/wait.h>
+ 
+ #include "ipcd.h"
+@@ -265,6 +268,57 @@
+     return ipcd_cfg_save(in);
+ }
+ 
++/* ---------------------------------------------------------------- */
++/* Log size                                                         */
++/*                                                                  */
++/* The start script points stdout and stderr at a file. Without a   */
++/* card that file is in RAM, and nothing else limits it: each       */
++/* connection adds a line every 5 s, about 0.8 MB a day. At this    */
++/* size the file becomes <file>.old and a new one starts, so the    */
++/* log takes at most about twice this size. A log on a card stays   */
++/* as it is.                                                        */
++/* ---------------------------------------------------------------- */
++#define LOG_ROTATE_BYTES  (1024 * 1024)
++#define LOG_TMPFS_MAGIC   0x01021994
++
++static void log_limit(void)
++{
++    struct stat st, out;
++    struct statfs fs;
++    char path[128], old[sizeof(path) + 4];
++    ssize_t n;
++    int fd;
++
++    if (fstat(STDERR_FILENO, &st) != 0 || !S_ISREG(st.st_mode) ||
++        st.st_size < LOG_ROTATE_BYTES)
++        return;
++    if (fstatfs(STDERR_FILENO, &fs) != 0 || fs.f_type != LOG_TMPFS_MAGIC)
++        return;
++
++    n = readlink("/proc/self/fd/2", path, sizeof(path) - 1);
++    if (n > 0 && n < (ssize_t)sizeof(path) - 1) {
++        path[n] = '\0';
++        snprintf(old, sizeof(old), "%s.old", path);
++        if (rename(path, old) == 0) {
++            fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0644);
++            if (fd >= 0) {
++                if (fstat(STDOUT_FILENO, &out) == 0 &&
++                    out.st_dev == st.st_dev && out.st_ino == st.st_ino)
++                    dup2(fd, STDOUT_FILENO);
++                dup2(fd, STDERR_FILENO);
++                if (fd > STDERR_FILENO) close(fd);
++                fprintf(stderr, "[log] older lines are in %s\n", old);
++                return;
++            }
++        }
++    }
++
++    /* No new file possible: better to lose the old lines than the RAM. */
++    if (ftruncate(STDERR_FILENO, 0) == 0)
++        lseek(STDERR_FILENO, 0, SEEK_SET);
++    fprintf(stderr, "[log] could not start a new file, older lines are gone\n");
++}
++
+ static void run_online_loop(void)
+ {
+     g_set_state(PCS_STA_OK);
+@@ -286,6 +340,7 @@
+     int lost_secs = 0;
+     while (g_run) {
+         sleep(2);
++        log_limit();
+ 
+         char ip[16] = "";
+         if (wifi_sta_has_ip(ip)) {
+@@ -331,6 +386,7 @@
+     int sta_failures = 0;
+ 
+     while (g_run) {
++        log_limit();
+         wifi_cfg_load(&G.cfg);
+ 
+         if (!G.cfg.configured) {
+--- a/src/ipcd/src/wifi_ctrl.c
++++ b/src/ipcd/src/wifi_ctrl.c
+@@ -190,8 +190,10 @@
+      * data path needs ~3s to be reliable. Empirical. */
+     sleep(3);
+ 
+-    /* Get DHCP lease in background. -t 5: 5 retries, then give up. */
+-    run_cmd("udhcpc -i %s -t 5 -T 3 -A 5 -x hostname:gt1pro", STA_IFACE);
++    /* Get DHCP lease in background. -t 5: 5 retries, then give up.
++     * Its lines go to syslog, which has its own limit: while it waits
++     * for a lease here, nothing limits our log (see log_limit). */
++    run_cmd("udhcpc -S -i %s -t 5 -T 3 -A 5 -x hostname:gt1pro >/dev/null 2>&1", STA_IFACE);
+ 
+     return WIFI_STA_OK;
+ }
