@@ -77,6 +77,14 @@ the player. `ipcd.log` on the card, or `/tmp/ipcd.log` and `/tmp/ipcd.log.old` o
 when no card is in, show `send failed, ending session`, which can also mean a real network problem. Version
 1.1.2 fixes this.
 
+Up to the same version, a player that sends RTCP over TCP lost its connection after some minutes,
+GStreamer's `rtspsrc` after about 7.5, with sound after half of that. Since 1.1.2 that no longer
+happens.
+
+Since 1.1.2, `send failed, ending session` means that a player took no data for about 20 seconds,
+usually because of the network. The camera then ends the connection, so the player learns about it and
+can connect again. Before, it stopped sending and kept the connection open.
+
 ## The log without a card
 
 Without a card, `ipcd` writes its log to `/tmp/ipcd.log`, which is in RAM. Each connection adds a

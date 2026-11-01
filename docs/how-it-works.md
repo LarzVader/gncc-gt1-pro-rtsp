@@ -132,6 +132,9 @@ here in `docs/`, and the original README is `docs/upstream-README.md`. Compared 
     Along with that, RTSP clients are disconnected at once, `sensor.init` runs at every start
     of the capture, with IR detection on a day or night mode forced by hand stays, the frame
     rate is limited to 30, and the web page refuses an RTSP port that is in use.
+  - `0015`: RTSP sessions: RTCP from a player is skipped instead of filling the read buffer,
+    responses no longer land in the middle of an RTP packet when the send buffer is full, and
+    a connection ends when its stream cannot go on, after about 20 seconds without progress.
 - **A smaller image**, as there is no hostapd, no OpenSSL and no WPA3, and no setup
   portal: the camera never opens an access point.
 - Vendor libraries the firmware does not use are left out, among them the debug servers

@@ -1,0 +1,277 @@
+ipcd: RTSP sessions cope with RTCP and a full send buffer, and end with the stream
+
+Four old faults in the RTSP server. A client hit by them lost its picture, sometimes
+without ever being told.
+
+- RTCP from the client is skipped now. serve_client only knew text requests, so the
+  reports stayed in its read buffer. Once that was full, recv with a length of 0
+  returned 0, which counted as a closed connection. GStreamer sends a report every
+  few seconds and lost the session after about 7.5 minutes, with sound after half of
+  that. A text request behind a report ended the session at once as a bad request,
+  as the parser stops at the null byte in the frame header. A frame too big for the
+  buffer still ends the connection.
+- Responses take write_mtx, as the comment at the lock always said. A send sleeping
+  on a full buffer lets go of the socket, so a response could land in the middle of
+  an RTP packet. ffmpeg then took video for RTSP lines and answered those, the server
+  answered that, and on a lasting overload the picture fell to a few frames a second.
+- Waiting for that lock must not keep serve_client from a capture restart, as it is
+  the thread that wakes a streamer stuck in a send. So sends now wait one second at a
+  time, like recv, and look at the restart counter in between. A client still gets 20
+  seconds without any progress, what two sends of 10 seconds came to in practice.
+- When the streamer gives up, the client learns about it. After "send failed" or "no
+  IDR available" the connection stayed open without ever sending a picture again. The
+  same now goes for half a response and a sound packet that could not be sent, as the
+  stream behind them is broken anyway. A client that leaves or pauses before the first
+  key frame is not affected.
+- A signal no longer ends a session. On a socket with a timeout, recv and send return
+  EINTR even for a signal nobody handles. system() blocks SIGCHLD in its own thread,
+  so that the signal goes to another one, as seen on a camera with a small test
+  program. ipcd only calls system() while the capture is stopped, so this is a
+  precaution. A send that gets interrupted or only gets rid of a part now carries on,
+  so that it cannot tear a frame either, which the sound thread and the responses
+  could do.
+
+--- a/src/ipcd/src/rtsp_server.c
++++ b/src/ipcd/src/rtsp_server.c
+@@ -1045,6 +1045,7 @@
+     char              peer_str[64];
+ 
+     enum client_state state;
++    unsigned          shutdowns;        /* g_shutdown_count at connect */
+     char              session_id[16];   /* generated at SETUP */
+     int               stream_idx;       /* 0 = /main, 1 = /sub */
+ 
+@@ -1083,7 +1084,9 @@
+ 
+     /* Serializes writes on conn_fd. The streamer thread (RTP send,
+      * interleaved-TCP only) and the main serve_client loop (RTSP
+-     * keepalive responses) can both write to the socket. */
++     * keepalive responses) can both write to the socket. A send sleeping
++     * on a full buffer lets go of the socket, so without the lock a
++     * response lands in the middle of an RTP packet. */
+     pthread_mutex_t   write_mtx;
+ 
+     /* RTSP read buffer (accumulates partial requests). */
+@@ -1097,6 +1100,42 @@
+     int       audio_streamer_started;
+ };
+ 
++/* A thread stuck in a send can sleep through a whole capture restart,
++ * until the next start has cleared g_shutdown. The counter still tells. */
++static int client_stopping(const struct client_ctx *c)
++{
++    return g_shutdown || c->shutdowns != g_shutdown_count;
++}
++
++/* How long a client may take no data at all before we give up on it. A
++ * Wi-Fi outage of some 12 seconds still recovers with this. */
++#define SEND_STALL_SECS 20
++
++/* Sends all of it or fails, so that neither a signal nor a full buffer
++ * tears a frame. Each send waits for SO_SNDTIMEO, one second: Whoever holds
++ * write_mtx must see a capture restart, because serve_client may be waiting
++ * for the lock, and it is the one to end the connection. */
++static int send_all(struct client_ctx *c, const void *buf, size_t len)
++{
++    const char *p = buf;
++    int stalled = 0;
++    while (len > 0) {
++        ssize_t n = send(c->conn_fd, p, len, MSG_NOSIGNAL);
++        if (n >= 0) {
++            p += n;
++            len -= (size_t)n;
++            stalled = 0;
++        } else if (errno == EINTR) {
++            continue;
++        } else if ((errno != EAGAIN && errno != EWOULDBLOCK) ||
++                   ++stalled >= SEND_STALL_SECS) {
++            return -1;
++        }
++        if (len > 0 && client_stopping(c)) return -1;
++    }
++    return 0;
++}
++
+ /* Serialize a response and send. The buffer is sized to fit a generous
+  * SDP (the biggest response we generate). */
+ static int send_response(struct client_ctx *c,
+@@ -1130,11 +1169,13 @@
+             status, cseq, extra_hdrs ? extra_hdrs : "");
+     }
+     if (n < 0 || (size_t)n >= sizeof(hdr)) return -1;
+-    if (send(c->conn_fd, hdr, n, MSG_NOSIGNAL) != n) return -1;
+-    if (body && blen > 0) {
+-        if (send(c->conn_fd, body, blen, MSG_NOSIGNAL) != blen) return -1;
+-    }
+-    return 0;
++    pthread_mutex_lock(&c->write_mtx);
++    int rc = send_all(c, hdr, (size_t)n);
++    if (rc == 0 && body && blen > 0) rc = send_all(c, body, (size_t)blen);
++    pthread_mutex_unlock(&c->write_mtx);
++    /* The client cannot make sense of anything behind half a response. */
++    if (rc != 0) shutdown(c->conn_fd, SHUT_RDWR);
++    return rc;
+ }
+ 
+ /* Map URL path to stream index. Returns -1 if no match. */
+@@ -1738,19 +1779,9 @@
+ static int outbuf_send_tcp(struct client_ctx *c, const struct outbuf *b)
+ {
+     pthread_mutex_lock(&c->write_mtx);
+-    size_t off = 0;
+-    while (off < b->len) {
+-        ssize_t n = send(c->conn_fd, b->data + off, b->len - off,
+-                         MSG_NOSIGNAL);
+-        if (n < 0) {
+-            if (errno == EINTR) continue;
+-            pthread_mutex_unlock(&c->write_mtx);
+-            return -1;
+-        }
+-        off += (size_t)n;
+-    }
++    int rc = send_all(c, b->data, b->len);
+     pthread_mutex_unlock(&c->write_mtx);
+-    return 0;
++    return rc;
+ }
+ 
+ /* For UDP: send a single RTP packet directly via sendto. Used by the
+@@ -1763,9 +1794,12 @@
+     if (payload_len > RTP_MAX_PAYLOAD) return -1;
+     rtp_build_hdr(pkt, marker, seq, ts, ssrc);
+     memcpy(pkt + RTP_HDR_LEN, payload, payload_len);
+-    ssize_t n = sendto(c->udp_rtp_fd, pkt, RTP_HDR_LEN + payload_len, 0,
+-                       (struct sockaddr *)&c->udp_rtp_addr,
+-                       sizeof(c->udp_rtp_addr));
++    ssize_t n;
++    do {
++        n = sendto(c->udp_rtp_fd, pkt, RTP_HDR_LEN + payload_len, 0,
++                   (struct sockaddr *)&c->udp_rtp_addr,
++                   sizeof(c->udp_rtp_addr));
++    } while (n < 0 && errno == EINTR);
+     return (n == (ssize_t)(RTP_HDR_LEN + payload_len)) ? 0 : -1;
+ }
+ 
+@@ -2082,14 +2116,20 @@
+             iv_pkt[3] = (uint8_t)(total & 0xff);
+             memcpy(iv_pkt + IV_HDR_LEN, rtp_pkt, total);
+             pthread_mutex_lock(&c->write_mtx);
+-            ssize_t s = send(c->conn_fd, iv_pkt, IV_HDR_LEN + total,
+-                             MSG_NOSIGNAL);
++            int s = send_all(c, iv_pkt, IV_HDR_LEN + total);
+             pthread_mutex_unlock(&c->write_mtx);
+-            if (s != (ssize_t)(IV_HDR_LEN + total)) break;
++            if (s != 0) {
++                /* Video must not go on behind half a packet. */
++                shutdown(c->conn_fd, SHUT_RDWR);
++                break;
++            }
+         } else {
+-            ssize_t s = sendto(c->audio_udp_rtp_fd, rtp_pkt, total, 0,
+-                               (struct sockaddr *)&c->audio_udp_rtp_addr,
+-                               sizeof(c->audio_udp_rtp_addr));
++            ssize_t s;
++            do {
++                s = sendto(c->audio_udp_rtp_fd, rtp_pkt, total, 0,
++                           (struct sockaddr *)&c->audio_udp_rtp_addr,
++                           sizeof(c->audio_udp_rtp_addr));
++            } while (s < 0 && errno == EINTR);
+             if (s != (ssize_t)total) break;
+         }
+ 
+@@ -2117,6 +2157,7 @@
+     if (c->xport == XPORT_UDP) {
+         if (udp_setup_sockets(c) < 0) {
+             fprintf(stderr, "[rtsp] %s UDP socket setup failed\n", c->peer_str);
++            shutdown(c->conn_fd, SHUT_RDWR);
+             return NULL;
+         }
+     }
+@@ -2188,6 +2229,9 @@
+ 
+     if (last_emit_gseq == 0) {
+         fprintf(stderr, "[rtsp] %s no IDR available, exiting\n", c->peer_str);
++        /* Unless the client left or paused before the first key frame: No
++         * picture will come, and the client should know. */
++        if (c->state == CS_PLAYING) shutdown(c->conn_fd, SHUT_RDWR);
+         return NULL;
+     }
+ 
+@@ -2256,6 +2300,7 @@
+                 next_data = malloc(e->data_len);
+                 if (!next_data) {
+                     pthread_mutex_unlock(&r->mtx);
++                    shutdown(c->conn_fd, SHUT_RDWR);
+                     goto cleanup;
+                 }
+                 memcpy(next_data, e->data, e->data_len);
+@@ -2350,6 +2395,7 @@
+         if (send_failed) {
+             fprintf(stderr, "[rtsp] %s send failed, ending session\n",
+                     c->peer_str);
++            shutdown(c->conn_fd, SHUT_RDWR);
+             break;
+         }
+ 
+@@ -2480,24 +2526,20 @@
+     struct client_ctx c;
+     memset(&c, 0, sizeof(c));
+     c.conn_fd = conn_fd;
++    c.shutdowns = g_shutdown_count;
+     c.udp_rtp_fd  = -1;
+     c.udp_rtcp_fd = -1;
+     pthread_mutex_init(&c.write_mtx, NULL);
+     snprintf(c.peer_str, sizeof(c.peer_str), "%s", peer_str);
+ 
+-    /* Reasonable IO timeouts so a misbehaving client can't hold us
+-     * forever. The loop below just carries on after a recv timeout, so
+-     * that one only decides how soon it sees a shutdown. */
++    /* Short IO timeouts: The loop below and send_all() just carry on after
++     * one, so they only decide how soon a thread sees a shutdown. A
++     * misbehaving client can't hold us forever, see SEND_STALL_SECS. */
+     struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+     setsockopt(conn_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+-    tv.tv_sec = 10;
+     setsockopt(conn_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+ 
+-    /* A thread stuck in a send can sleep through a whole capture restart,
+-     * until the next start has cleared g_shutdown. The counter still tells. */
+-    unsigned shutdowns = g_shutdown_count;
+-
+-    while (!g_shutdown && shutdowns == g_shutdown_count) {
++    while (!client_stopping(&c)) {
+         /* If state went back to CS_INIT (TEARDOWN), close. */
+         if (c.state == CS_INIT && c.session_id[0]) break;
+ 
+@@ -2505,7 +2547,8 @@
+                            c.rxbuf + c.rxlen,
+                            sizeof(c.rxbuf) - c.rxlen - 1, 0);
+         if (got <= 0) {
+-            if (got < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
++            if (got < 0 && (errno == EAGAIN || errno == EWOULDBLOCK ||
++                            errno == EINTR)) {
+                 continue;
+             }
+             break;  /* peer closed or error */
+@@ -2515,6 +2558,21 @@
+ 
+         /* Parse as many full requests as we have buffered. */
+         while (c.rxlen > 0) {
++            /* Interleaved RTCP from the client, nothing we use. */
++            if (c.rxbuf[0] == '$') {
++                if (c.rxlen < IV_HDR_LEN) break;
++                size_t frame = IV_HDR_LEN +
++                    (((size_t)(uint8_t)c.rxbuf[2] << 8) | (uint8_t)c.rxbuf[3]);
++                if (frame >= sizeof(c.rxbuf)) {
++                    fprintf(stderr, "[rtsp] %s interleaved frame too big\n",
++                            c.peer_str);
++                    goto done;
++                }
++                if (c.rxlen < frame) break;
++                c.rxlen -= frame;
++                memmove(c.rxbuf, c.rxbuf + frame, c.rxlen);
++                continue;
++            }
+             struct rtsp_request req;
+             int consumed = rtsp_parse(c.rxbuf, c.rxlen, &req);
+             if (consumed == 0) break;          /* need more bytes */
