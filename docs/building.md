@@ -58,9 +58,15 @@ $OUT/host/bin/unsquashfs -d stock/app $BACKUP/mtd7.bin
 installer/make-release.sh $OUT stock 1.1.2
 ```
 
-`dist/sdcard` is what goes on the card. If you used the same sources and stock firmware
-as the release, `images.sha256` has the same checksums for ROOTFS and APP. The kernel
-should match too, as it is built with a fixed build name and time (see `external.mk`).
+`dist/sdcard` is what goes on the card. `make-release.sh` writes `images.sha256` from your own
+build, so the installer checks the camera's result against your images.
+
+Do not expect your images to match the release byte for byte. BusyBox holds its build time, so
+ROOTFS differs. Measured on a GK2 build of the same tree, not on this model: from a clean clone,
+compared with a build on the same machine at another time and path, `ipcd` and the uImage came
+out the same (the kernel is built with a fixed time stamp and without the name of the build
+machine, see `external.mk`). ROOTFS and APP did not, and `libnl-genl` differed at the same size,
+for a reason nobody has looked into.
 
 Keep `stock/`, `package/anyka-libs/lib`, `package/anyka-modules/files` and
 `board/anyka/stock` to yourself: these are the vendor's files. `.gitignore` keeps them

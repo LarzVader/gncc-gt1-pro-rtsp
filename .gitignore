@@ -2,6 +2,7 @@
 package/anyka-libs/lib/
 package/anyka-modules/files/
 board/anyka/stock/
+/stock/
 *.ko
 *.so
 *.so.*
