@@ -7,7 +7,7 @@ account, no connection to the internet. All you need is a microSD card. You do n
 to open the camera or solder anything, and you do not need a Linux PC.
 
 Copy the package to a card, enter your Wi-Fi, put the card in the camera, power it on,
-and wait a quarter of an hour.
+and wait about 3 minutes.
 
 ## What you get
 
@@ -138,8 +138,10 @@ How that works, and what else is different from the stock firmware:
 
 You replace the firmware of a device, at your own risk and only on a camera you own. You lose
 your warranty and the cloud functions of the app. The firmware runs on two cameras so far. The
-installer and the way back to the stock firmware have been tested on one of them, with version
-1.0, which is not much. If it worked or did not work on yours, please tell us in an
+installer has run on one of them, with version 1.0 and a CONFIG backup that held no Wi-Fi
+settings and no cloud data of the stock firmware. The way back wrote and checked the stock
+firmware there, but nobody watched it run afterwards. That is not much. If it worked or did not
+work on yours, please tell us in an
 [issue](https://github.com/LarzVader/gncc-gt1-pro-rtsp/issues), with your firmware version.
 
 ## Thanks
@@ -162,6 +164,6 @@ This project stands on the work of others:
 
 ## License
 
-The work in this project is under the [MIT license](LICENSE). The package also holds free software
-by others, under its own licences: see [THIRD-PARTY.md](THIRD-PARTY.md). Each release has the source
-code that comes with it.
+The work in this project is under the [MIT license](LICENSE). The package also holds software by
+others, under its own licences. [THIRD-PARTY.md](THIRD-PARTY.md) lists it and says what is in the
+source bundle of each release.

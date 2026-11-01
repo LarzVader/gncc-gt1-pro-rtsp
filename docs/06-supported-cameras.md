@@ -68,7 +68,8 @@ the exposure is capped to 2152 lines and the night image is noticeably grainier
 ### Orientation
 
 Both cameras mount the sensor rotated 180 degrees. The fix is a single sensor
-register write, run by `S60ipcd` from `/etc/config/sensor.init`:
+register write from `/etc/config/sensor.init`, run by `ipcd` at every start of the
+capture and by `S60ipcd` every minute:
 
 ```sh
 i2ctransfer -f -y 0 w2@0x40 0x12 0x30

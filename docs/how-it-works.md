@@ -31,7 +31,8 @@ Nothing is soldered, opened or exploited, and the same hook works on every run.
 and continues there, so that from now on nothing depends on the stock system.
 
 **1. Checks.** Flash layout, kernel version, and the SHA-256 of every file it will
-take from the camera, against `vendor-files.txt`. A camera that differs stops here.
+take from the camera, against `vendor-files.txt`. A camera that differs stops here. Only
+`FORCE_UNKNOWN_FIRMWARE=yes` in `settings.txt` lets a camera with other vendor files go on.
 
 **2. Backup.** All eight flash partitions go to `backup-<serial>/` on the card, plus
 one `full.bin`. Each partition is compared with a second read of the flash after the
@@ -45,7 +46,8 @@ goes to the card.
 
 The result is compared with `images.sha256`. mksquashfs is deterministic: same files,
 same options, same bytes. So the firmware on your camera is **bit for bit the firmware
-that was tested**, even though nobody ever distributed it.
+that was tested**, even though nobody ever distributed it. A camera forced with
+`FORCE_UNKNOWN_FIRMWARE=yes` is the exception.
 
 **4. Settings.** Wi-Fi, passwords and camera settings go to the CONFIG partition, and
 the rest of what is on there goes away: the old Wi-Fi password, the cloud certificates
@@ -106,7 +108,10 @@ here in `docs/`, and the original README is `docs/upstream-README.md`. Compared 
   - `0002`: NTP only from your own setting
   - `0003`: microphone off by default
   - `0004`: WPA2 only, as WPA3 hung the connection on this driver
-  - `0005`: no periodic statistics in the log: without a card the log is in RAM
+  - `0005`: fewer periodic statistics in the log, as without a card the log is in RAM: the
+    line per video stream only for its first three intervals and for intervals without a
+    frame. The line per playing connection every 5 seconds stays, see
+    [the log without a card](troubleshooting.md#the-log-without-a-card).
   - `0006`: find the IR filter GPIOs, so that night vision works on the GT1 Pro
   - `0007`: send a host name with the DHCP request
   - `0008`: check for daylight every 10 minutes instead of every minute: each check is
@@ -114,6 +119,19 @@ here in `docs/`, and the original README is `docs/upstream-README.md`. Compared 
   - `0009`: RTP over TCP only, unless `rtsp_udp = 1` is set: over Wi-Fi, UDP loses packets
   - `0010`: black and white at night, by setting the chroma gain of the ISP to 0: the same
     switch in the encoder kills the process on this camera
+  - `0011`: HTTP Digest: the Authorization header must name the requested path, so a header
+    overheard on the LAN does not pass on another POST such as `/api/auth`. RTSP stays as
+    it was.
+  - `0012`: a stream no longer stops when a frame ends exactly on RTP packet 65535: the
+    counter then wraps to 0, which the code took for "out of memory"
+  - `0013`: the log in RAM stays below about 2 MB: at 1 MB the file becomes `<file>.old` and
+    a new one starts. A log on a card stays as it is. udhcpc now logs to syslog, which has
+    its own limit.
+  - `0014`: a restart of the capture no longer hangs: the stop waited for the watchdog
+    thread, which never ends. If a stop takes longer than a minute, the camera restarts.
+    Along with that, RTSP clients are disconnected at once, `sensor.init` runs at every start
+    of the capture, with IR detection on a day or night mode forced by hand stays, the frame
+    rate is limited to 30, and the web page refuses an RTSP port that is in use.
 - **A smaller image**, as there is no hostapd, no OpenSSL and no WPA3, and no setup
   portal: the camera never opens an access point.
 - Vendor libraries the firmware does not use are left out, among them the debug servers

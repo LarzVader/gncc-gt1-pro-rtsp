@@ -6,7 +6,7 @@ Mach aus deiner GNCC GT1 Pro eine ganz normale Netzwerkkamera: RTSP-Stream, kein
 kein Konto, keine Verbindung ins Internet. Du brauchst nur eine microSD-Karte. Du musst die Kamera
 nicht öffnen und nichts löten, und du brauchst keinen Linux-PC.
 
-Paket auf eine Karte kopieren, WLAN eintragen, Karte in die Kamera, Strom an, eine Viertelstunde warten.
+Paket auf eine Karte kopieren, WLAN eintragen, Karte in die Kamera, Strom an, etwa 3 Minuten warten.
 
 ## Was du bekommst
 
@@ -131,8 +131,9 @@ Selbst bauen: [Building](docs/building.md).
 ## Risiken
 
 Du ersetzt die Firmware eines Geräts, auf eigene Gefahr und nur bei einer Kamera, die dir gehört. Du verlierst
-die Garantie und die Cloud-Funktionen der App. Die Firmware läuft bisher auf zwei Kameras. Der Installer und der
-Rückweg zur Originalfirmware sind an einer davon getestet, mit Version 1.0, das ist nicht viel. Hat es bei dir geklappt oder nicht? Sag bitte in einem [Issue](https://github.com/LarzVader/gncc-gt1-pro-rtsp/issues)
+die Garantie und die Cloud-Funktionen der App. Die Firmware läuft bisher auf zwei Kameras. Der Installer lief auf
+einer davon, mit Version 1.0 und einer CONFIG-Sicherung ohne WLAN-Daten und ohne Cloud-Daten der Originalfirmware. Der
+Rückweg hat dort die Originalfirmware geschrieben und geprüft, aber niemand hat sie danach laufen sehen. Das ist nicht viel. Hat es bei dir geklappt oder nicht? Sag bitte in einem [Issue](https://github.com/LarzVader/gncc-gt1-pro-rtsp/issues)
 Bescheid, mit deiner Firmware-Version.
 
 ## Danke
@@ -154,5 +155,5 @@ Dieses Projekt baut auf der Arbeit anderer auf:
 
 ## Lizenz
 
-Die Arbeit in diesem Projekt steht unter der [MIT-Lizenz](LICENSE). Das Paket enthält außerdem freie Software anderer
-unter deren eigenen Lizenzen, siehe [THIRD-PARTY.md](THIRD-PARTY.md). Zu jedem Release gehört der passende Quellcode.
+Die Arbeit in diesem Projekt steht unter der [MIT-Lizenz](LICENSE). Das Paket enthält außerdem Software anderer
+unter deren eigenen Lizenzen. [THIRD-PARTY.md](THIRD-PARTY.md) listet sie auf und sagt, was im Quellpaket jedes Release liegt.
