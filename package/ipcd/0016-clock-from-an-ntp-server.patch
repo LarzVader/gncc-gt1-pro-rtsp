@@ -1,0 +1,307 @@
+ipcd: set the clock from an NTP server without ntpd
+
+/etc/config/ntp_server never had any effect. timesync.c ran ntpd, but the BusyBox in
+this firmware is built without it, so the clock stayed at the year 2000. Adding ntpd
+would change the root image, and all cameras would need an update of it.
+
+ipcd now asks the server itself, with a small SNTP client. Before the capture starts it
+asks once, which takes 6 seconds at most if nobody answers. A thread then asks every
+hour, or every minute until the first answer. It sets the clock if it is half a second
+off or more and otherwise lets the kernel correct it slowly with adjtime(). The hardware
+clock is written directly, so no child process is involved any more. Without the file
+nothing changes: no thread, no traffic.
+
+A reply only counts if it comes from the server, carries our random transmit timestamp
+back, and the server says that it is synchronised.
+
+The uptime in /api/stats no longer depends on the clock, which would have added 26 years.
+
+--- a/src/ipcd/src/timesync.c
++++ b/src/ipcd/src/timesync.c
+@@ -2,11 +2,13 @@
+  * timesync.c — set system clock via NTP after STA comes up.
+  *
+  * Two phases:
+- *   1) timesync_oneshot(): blocking, ~10s timeout. We use BusyBox
+- *      ntpd -nq which runs once and exits.
+- *   2) timesync_daemon_start(): spawn ntpd in background to keep the
++ *   1) timesync_oneshot(): blocking, 6s at most. Asks the server once.
++ *   2) timesync_daemon_start(): a thread that keeps asking, to keep the
+  *      clock disciplined.
+  *
++ * This is a small SNTP client (RFC 4330). The firmware has no ntpd: BusyBox
++ * is built without it, and adding it would change the root image.
++ *
+  * We don't bother with `date -s 2026-01-01` here because rc.local
+  * already runs `hwclock -s` after loading ak_rtc.ko. If RTC battery
+  * is dead and clock starts at 2000-01-01, NTP will jump us forward
+@@ -16,14 +18,27 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <unistd.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <netdb.h>
++#include <pthread.h>
++#include <stdint.h>
++#include <sys/ioctl.h>
++#include <sys/socket.h>
+ #include <sys/types.h>
+-#include <sys/wait.h>
+ #include <sys/time.h>
++#include <linux/rtc.h>
+ #include <time.h>
+ 
+ #include "ipcd.h"
+ 
+ #define NTP_SERVER_PATH "/etc/config/ntp_server"
++#define RTC_PATH        "/dev/rtc0"
++#define NTP_TRIES       3
++#define NTP_WAIT_SECS   2
++#define NTP_EVERY_SECS  3600   /* once the clock is set */
++#define NTP_RETRY_SECS  60     /* until then */
++#define NTP_STEP_SECS   0.5    /* below that, adjtime() corrects slowly */
+ 
+ /* The NTP server comes from NTP_SERVER_PATH. Without that file the camera
+  * sends no NTP traffic and keeps its RTC time. Only host-name characters
+@@ -44,26 +59,146 @@
+     return 0;
+ }
+ 
+-/* Run a command with a wall-clock timeout. Returns child exit status,
+- * or -1 on spawn failure / timeout. */
+-static int run_with_timeout(const char *argv0, char *const argv[], int timeout_s)
+-{
+-    pid_t pid = fork();
+-    if (pid < 0) return -1;
+-    if (pid == 0) {
+-        execvp(argv0, argv);
+-        _exit(127);
+-    }
+-    time_t deadline = time(NULL) + timeout_s;
+-    while (time(NULL) < deadline) {
+-        int st;
+-        pid_t r = waitpid(pid, &st, WNOHANG);
+-        if (r == pid) return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+-        usleep(200 * 1000);
+-    }
+-    kill(pid, SIGKILL);
+-    waitpid(pid, NULL, 0);
+-    return -1;
++static double clock_now(void)
++{
++    struct timeval tv;
++    gettimeofday(&tv, NULL);
++    return (double)tv.tv_sec + (double)tv.tv_usec / 1e6;
++}
++
++static uint32_t be32(const uint8_t *p)
++{
++    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
++           ((uint32_t)p[2] << 8) | (uint32_t)p[3];
++}
++
++/* An NTP timestamp in seconds since 1970. It wraps in 2036. */
++static double ntp_time(const uint8_t *p)
++{
++    uint32_t secs = be32(p);
++    double t = (double)secs - 2208988800.0;
++    if (!(secs & 0x80000000u)) t += 4294967296.0;
++    return t + (double)be32(p + 4) / 4294967296.0;
++}
++
++/* Asks the server once. server is a name or an address, optionally with
++ * :port. Returns 0 and how far our clock is behind. */
++static int ntp_query(char *server, double *offset)
++{
++    const char *port = "123";
++    char *colon = strchr(server, ':');
++    if (colon) {
++        *colon = 0;
++        port = colon + 1;
++    }
++    struct addrinfo hints, *ai = NULL;
++    memset(&hints, 0, sizeof(hints));
++    hints.ai_family = AF_INET;
++    hints.ai_socktype = SOCK_DGRAM;
++    if (getaddrinfo(server, port, &hints, &ai) != 0) return -1;
++
++    /* Connected: The kernel only hands us what comes from the server. */
++    int s = socket(ai->ai_family, ai->ai_socktype, 0);
++    if (s < 0 || connect(s, ai->ai_addr, ai->ai_addrlen) != 0) {
++        if (s >= 0) close(s);
++        freeaddrinfo(ai);
++        return -1;
++    }
++    freeaddrinfo(ai);
++    struct timeval tv = { .tv_sec = NTP_WAIT_SECS, .tv_usec = 0 };
++    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
++
++    int rc = -1;
++    for (int i = 0; i < NTP_TRIES && rc != 0; i++) {
++        uint8_t q[48], r[64];
++        memset(q, 0, sizeof(q));
++        q[0] = 0x23;            /* no warning, version 4, client */
++        /* The server sends the transmit timestamp back. It need not be our
++         * time, as we keep that ourselves, so it can prove the reply is new. */
++        int fd = open("/dev/urandom", O_RDONLY);
++        if (fd < 0 || read(fd, q + 40, 8) != 8) {
++            uint32_t v = (uint32_t)(clock_now() * 1000.0);
++            memcpy(q + 40, &v, sizeof(v));
++        }
++        if (fd >= 0) close(fd);
++
++        double t1 = clock_now();
++        if (send(s, q, sizeof(q), MSG_NOSIGNAL) != (ssize_t)sizeof(q)) continue;
++        double end = t1 + NTP_WAIT_SECS;
++        while (clock_now() < end && clock_now() >= t1) {
++            ssize_t n = recv(s, r, sizeof(r), 0);
++            if (n < 0 && errno == EINTR) continue;
++            if (n < 0) break;
++            double t4 = clock_now();
++            if (n < 48 || memcmp(r + 24, q + 40, 8) != 0) continue;
++            if ((r[0] & 0x07) != 4 || (r[0] >> 6) == 3) continue;  /* not a server, not in sync */
++            if (r[1] == 0 || r[1] > 15) continue;                  /* stratum: refused or no clock */
++            if (be32(r + 40) == 0) continue;
++            *offset = ((ntp_time(r + 32) - t1) + (ntp_time(r + 40) - t4)) / 2.0;
++            rc = 0;
++            break;
++        }
++    }
++    close(s);
++    return rc;
++}
++
++/* Directly and not with hwclock -w: A child process that ends in system()
++ * sends its SIGCHLD to another thread, and that can break off a socket call. */
++static void rtc_write(void)
++{
++    int fd = open(RTC_PATH, O_RDONLY);
++    if (fd < 0) return;
++    time_t now = time(NULL);
++    struct tm tm;
++    gmtime_r(&now, &tm);
++    struct rtc_time rt;
++    memset(&rt, 0, sizeof(rt));
++    rt.tm_sec = tm.tm_sec;
++    rt.tm_min = tm.tm_min;
++    rt.tm_hour = tm.tm_hour;
++    rt.tm_mday = tm.tm_mday;
++    rt.tm_mon = tm.tm_mon;
++    rt.tm_year = tm.tm_year;
++    if (ioctl(fd, RTC_SET_TIME, &rt) != 0)
++        fprintf(stderr, "[time] could not write %s: %s\n", RTC_PATH, strerror(errno));
++    close(fd);
++}
++
++static int g_ntp_answers = 1;   /* so that the first failure is logged */
++
++/* Asks the server and corrects the clock. Returns 0 if it answered. */
++static int clock_correct(const char *configured)
++{
++    char server[128];
++    snprintf(server, sizeof(server), "%s", configured);
++    double offset = 0;
++    if (ntp_query(server, &offset) != 0) {
++        if (g_ntp_answers)
++            fprintf(stderr, "[time] no answer from %s, keeping current clock\n", configured);
++        g_ntp_answers = 0;
++        return -1;
++    }
++    g_ntp_answers = 1;
++    if (offset >= NTP_STEP_SECS || offset <= -NTP_STEP_SECS) {
++        double t = clock_now() + offset;
++        struct timeval tv;
++        tv.tv_sec = (time_t)t;
++        tv.tv_usec = (suseconds_t)((t - (double)tv.tv_sec) * 1e6);
++        if (settimeofday(&tv, NULL) != 0) {
++            fprintf(stderr, "[time] could not set the clock: %s\n", strerror(errno));
++            return 0;
++        }
++        fprintf(stderr, "[time] clock set from %s, it was off by %.1f s\n", configured, offset);
++    } else {
++        struct timeval d;
++        d.tv_sec = (time_t)offset;
++        d.tv_usec = (suseconds_t)((offset - (double)d.tv_sec) * 1e6);
++        if (adjtime(&d, NULL) != 0)
++            fprintf(stderr, "[time] adjtime: %s\n", strerror(errno));
++    }
++    rtc_write();
++    return 0;
+ }
+ 
+ int timesync_oneshot(void)
+@@ -73,27 +208,30 @@
+         fprintf(stderr, "[time] no %s, NTP off\n", NTP_SERVER_PATH);
+         return -1;
+     }
+-    /* BusyBox ntpd: -n no-fork, -q quit-after-sync, -p peer */
+-    char *argv[] = { "ntpd", "-nq", "-p", server, NULL };
+-    int rc = run_with_timeout("ntpd", argv, 15);
+-    if (rc != 0) {
+-        fprintf(stderr, "[time] ntpd -nq failed (rc=%d), keeping current clock\n", rc);
+-        return -1;
++    return clock_correct(server);
++}
++
++static void *timesync_thread(void *arg)
++{
++    char *server = arg;
++    int answered = 0;
++    for (;;) {
++        sleep(answered ? NTP_EVERY_SECS : NTP_RETRY_SECS);
++        answered = clock_correct(server) == 0;
+     }
+-    /* Best effort: persist to RTC if available */
+-    int sysrc = system("hwclock -w 2>/dev/null");
+-    (void)sysrc;
+-    return 0;
++    return NULL;
+ }
+ 
+ int timesync_daemon_start(void)
+ {
+-    char server[128];
++    static char server[128];
++    static int started;
++    /* The online loop comes through here again after a lost connection. */
++    if (started) return 0;
+     if (ntp_server(server, sizeof(server)) != 0) return -1;
+-    /* fire-and-forget; if a previous ntpd lingers, kill it first */
+-    char cmd[256];
+-    snprintf(cmd, sizeof(cmd), "killall -q ntpd; ntpd -p %s 2>/dev/null", server);
+-    int sysrc = system(cmd);
+-    (void)sysrc;
++    pthread_t tid;
++    if (pthread_create(&tid, NULL, timesync_thread, server) != 0) return -1;
++    pthread_detach(tid);
++    started = 1;
+     return 0;
+ }
+--- a/src/ipcd/src/main.c
++++ b/src/ipcd/src/main.c
+@@ -551,7 +551,10 @@
+ /* ---------------------------------------------------------------- */
+ int main(int argc, char **argv)
+ {
+-    G.boot_time = time(NULL);
++    /* Not the clock, NTP sets that later. */
++    struct timespec boot;
++    clock_gettime(CLOCK_MONOTONIC, &boot);
++    G.boot_time = boot.tv_sec;
+ 
+     /* Layered config: each layer overrides the previous one.
+      *
+--- a/src/ipcd/src/stats.c
++++ b/src/ipcd/src/stats.c
+@@ -294,7 +294,9 @@
+     out->ir_luma      = ir_get_luma();
+ 
+     /* Process */
+-    out->uptime_s = (long)(time(NULL) - G.boot_time);
++    struct timespec mono;
++    clock_gettime(CLOCK_MONOTONIC, &mono);
++    out->uptime_s = (long)(mono.tv_sec - G.boot_time);
+     out->rss_kb   = read_rss_kb();
+ }
+ 

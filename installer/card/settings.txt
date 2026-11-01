@@ -18,6 +18,13 @@ RTSP_PASSWORD=
 ROOT_PASSWORD=
 
 
+# Optional: the address of an NTP server on your local network. The camera has no
+# way out to the internet, so without one its clock stays wrong. This does not
+# affect the video.
+
+NTP_SERVER=
+
+
 # yes: only check whether this camera is compatible and save the backup. The
 # firmware is not replaced.
 

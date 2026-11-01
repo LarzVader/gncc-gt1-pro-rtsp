@@ -135,6 +135,8 @@ here in `docs/`, and the original README is `docs/upstream-README.md`. Compared 
   - `0015`: RTSP sessions: RTCP from a player is skipped instead of filling the read buffer,
     responses no longer land in the middle of an RTP packet when the send buffer is full, and
     a connection ends when its stream cannot go on, after about 20 seconds without progress.
+  - `0016`: the clock comes from the NTP server you set. `ipcd` asks it itself, at every start
+    and once an hour, as the firmware has no `ntpd`.
 - **A smaller image**, as there is no hostapd, no OpenSSL and no WPA3, and no setup
   portal: the camera never opens an access point.
 - Vendor libraries the firmware does not use are left out, among them the debug servers
