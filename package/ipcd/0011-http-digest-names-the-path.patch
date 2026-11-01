@@ -1,0 +1,51 @@
+ipcd: HTTP Digest: the header must name the requested path
+
+The digest covers the uri in the Authorization header, but nothing compared
+that uri with the request. So the header of any POST, overheard on the LAN, also
+passed on every other POST for as long as its nonce lived (10 minutes), among
+them POST /api/auth, which sets the password. RTSP stays as it was: some clients
+send the base URI with SETUP and PLAY.
+
+--- a/src/ipcd/src/auth.c
++++ b/src/ipcd/src/auth.c
+@@ -571,18 +571,16 @@
+      * VLC, ffmpeg, GStreamer all behave this way.
+      *
+      * We therefore use authz_uri for HA2 below. We do NOT require
+-     * authz_uri == request URI: that would falsely reject every
+-     * RTSP SETUP. The digest itself is the cryptographic binding —
+-     * an attacker who substitutes the URL must recompute the
+-     * digest, which requires the password. The `uri` parameter
+-     * passed in is now unused; kept for API stability with the
+-     * older signature in case future code wants to do its own
+-     * URL/scope check at a higher level.
++     * authz_uri == request URI for RTSP: that would falsely reject
++     * SETUP from such clients, so the RTSP caller passes uri = NULL. HTTP
++     * does require it. Without the check the header of any POST,
++     * overheard on the LAN, also passes on POST /api/auth for as
++     * long as its nonce lives, and that sets the password.
+      */
+-    (void)uri;
+-
+     if (!authz_uri[0]) return AUTH_NEEDED;
+ 
++    if (uri && strcmp(authz_uri, uri) != 0) return AUTH_FAIL;
++
+     if (!verify_nonce(nonce)) return AUTH_FAIL;
+ 
+     /* User must match. We compare the configured user to the one
+@@ -705,12 +703,13 @@
+                               const char *method,
+                               const char *uri)
+ {
++    (void)uri;
+     if (!auth_is_configured()) return AUTH_OK;
+     if (!authz_value || !*authz_value) return AUTH_NEEDED;
+     /* Try Digest first (preferred), Basic as a fallback. */
+     while (*authz_value == ' ' || *authz_value == '\t') authz_value++;
+     if (strncasecmp(authz_value, "Digest", 6) == 0)
+-        return verify_digest(authz_value, method, uri);
++        return verify_digest(authz_value, method, NULL);
+     if (strncasecmp(authz_value, "Basic", 5) == 0)
+         return verify_basic(authz_value);
+     return AUTH_NEEDED;
