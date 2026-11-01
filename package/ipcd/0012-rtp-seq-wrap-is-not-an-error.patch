@@ -1,0 +1,90 @@
+ipcd: a wrapped RTP sequence number is not an error
+
+The TCP packetizers returned the next sequence number, or 0 when out of memory.
+The 16-bit counter also reaches 0 when an access unit ends exactly on 65535, so
+such a unit counted as a failed send: it was dropped, the streamer logged "send
+failed, ending session" and stopped, and the connection stayed open. The client
+saw silence until its own timeout. At 15 frames per second this happens to a
+connection about once an hour.
+
+Return -1 when out of memory. The UDP packetizer has its own failure flag and
+is not affected.
+
+--- a/src/ipcd/src/rtsp_server.c
++++ b/src/ipcd/src/rtsp_server.c
+@@ -1629,8 +1629,9 @@
+  * in MTU) or a chain of FU fragments. The marker bit is set on the
+  * very last packet of the AU only.
+  *
+- * Returns the next sequence number to use, or 0 on alloc failure. */
+-static uint16_t packetize_h264_au(struct outbuf *out, int iv_chan,
++ * Returns the next sequence number to use (0..65535, and 0 is a normal
++ * value because the counter wraps), or -1 on alloc failure. */
++static int packetize_h264_au(struct outbuf *out, int iv_chan,
+                                     const uint8_t * const *nals,
+                                     const size_t *nal_lens, int n_nals,
+                                     uint32_t rtp_ts, uint16_t seq,
+@@ -1643,7 +1644,7 @@
+         if (len <= RTP_MAX_PAYLOAD) {
+             uint8_t marker = (uint8_t)(last_nal ? 1 : 0);
+             if (outbuf_append_rtp(out, iv_chan, marker, seq,
+-                                   rtp_ts, ssrc, nal, len) < 0) return 0;
++                                   rtp_ts, ssrc, nal, len) < 0) return -1;
+             seq++;
+         } else {
+             /* FU-A fragmentation. Strip NAL header byte, replace with
+@@ -1664,7 +1665,7 @@
+                 uint8_t marker = (uint8_t)((last_nal && last_frag) ? 1 : 0);
+                 if (outbuf_append_rtp(out, iv_chan, marker, seq,
+                                        rtp_ts, ssrc, fu_pkt, take + 2) < 0)
+-                    return 0;
++                    return -1;
+                 seq++;
+                 body     += take;
+                 body_left -= take;
+@@ -1675,7 +1676,7 @@
+     return seq;
+ }
+ 
+-static uint16_t packetize_h265_au(struct outbuf *out, int iv_chan,
++static int packetize_h265_au(struct outbuf *out, int iv_chan,
+                                     const uint8_t * const *nals,
+                                     const size_t *nal_lens, int n_nals,
+                                     uint32_t rtp_ts, uint16_t seq,
+@@ -1688,7 +1689,7 @@
+         if (len <= RTP_MAX_PAYLOAD) {
+             uint8_t marker = (uint8_t)(last_nal ? 1 : 0);
+             if (outbuf_append_rtp(out, iv_chan, marker, seq,
+-                                   rtp_ts, ssrc, nal, len) < 0) return 0;
++                                   rtp_ts, ssrc, nal, len) < 0) return -1;
+             seq++;
+         } else {
+             /* HEVC FU fragmentation. NAL header is 2 bytes:
+@@ -1717,7 +1718,7 @@
+                 uint8_t marker = (uint8_t)((last_nal && last_frag) ? 1 : 0);
+                 if (outbuf_append_rtp(out, iv_chan, marker, seq,
+                                        rtp_ts, ssrc, fu_pkt, take + 3) < 0)
+-                    return 0;
++                    return -1;
+                 seq++;
+                 body     += take;
+                 body_left -= take;
+@@ -2326,15 +2327,15 @@
+         int send_failed = 0;
+         if (c->xport == XPORT_TCP) {
+             ob.len = 0;  /* reset */
+-            uint16_t new_seq = (codec == RTSP_CODEC_H265)
++            int new_seq = (codec == RTSP_CODEC_H265)
+                 ? packetize_h265_au(&ob, iv_chan, all_nals, all_lens, n_all,
+                                      rtp_ts, seq, ssrc)
+                 : packetize_h264_au(&ob, iv_chan, all_nals, all_lens, n_all,
+                                      rtp_ts, seq, ssrc);
+-            if (new_seq == 0 || outbuf_send_tcp(c, &ob) < 0) {
++            if (new_seq < 0 || outbuf_send_tcp(c, &ob) < 0) {
+                 send_failed = 1;
+             }
+-            seq = new_seq;
++            seq = (uint16_t)new_seq;
+         } else {
+             /* UDP: send each RTP packet directly with sendto, no
+              * buffering. Marker bit is handled correctly by
